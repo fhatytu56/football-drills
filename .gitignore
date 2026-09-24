@@ -4,4 +4,3 @@ out/
 .vercel/
 .env*.local
 *.tsbuildinfo
-next-env.d.ts

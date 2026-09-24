@@ -2,8 +2,9 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Wayside Celtic U10s — Drill Archive',
-  description: 'Training drill archive for Wayside Celtic U10s',
+  title: 'Wayside Celtic — Drill Archive',
+  description: 'Training drill archive for Wayside Celtic U8s, U9s, U10s and U11s',
+  icons: { icon: '/icon-192.png', apple: '/apple-touch-icon.png' },
   manifest: '/manifest.json',
 }
 

@@ -2,17 +2,18 @@
 
 import { useState } from 'react';
 import { X } from 'lucide-react';
+import type { AgeGroup } from '@/lib/groups';
 
 interface AddDrillModalProps {
+  group: AgeGroup;
   isOpen: boolean;
   onClose: () => void;
   onDrillAdded: () => void;
 }
 
-export default function AddDrillModal({ isOpen, onClose, onDrillAdded }: AddDrillModalProps) {
+export default function AddDrillModal({ group, isOpen, onClose, onDrillAdded }: AddDrillModalProps) {
   const [title, setTitle] = useState('');
   const [url, setUrl] = useState('');
-  const [ageCategory, setAgeCategory] = useState('U10');
   const [gamePhase, setGamePhase] = useState('ATTACKING');
   const [submitting, setSubmitting] = useState(false);
 
@@ -29,7 +30,7 @@ export default function AddDrillModal({ isOpen, onClose, onDrillAdded }: AddDril
         body: JSON.stringify({
           title,
           url,
-          age_category: ageCategory,
+          age_group: group.id,
           game_phase: gamePhase,
         }),
       });
@@ -61,7 +62,7 @@ export default function AddDrillModal({ isOpen, onClose, onDrillAdded }: AddDril
           <X className="w-5 h-5" />
         </button>
 
-        <h2 className="text-lg font-bold text-slate-800 mb-4">Add New Drill</h2>
+        <h2 className="text-lg font-bold text-slate-800 mb-4">Add Drill to {group.label}</h2>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
@@ -88,21 +89,7 @@ export default function AddDrillModal({ isOpen, onClose, onDrillAdded }: AddDril
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">Age Category</label>
-              <select
-                value={ageCategory}
-                onChange={(e) => setAgeCategory(e.target.value)}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
-              >
-                <option value="U8">U8</option>
-                <option value="U10">U10</option>
-                <option value="U12">U12</option>
-                <option value="U14">U14+</option>
-              </select>
-            </div>
-
+          <div>
             <div>
               <label className="block text-xs font-bold text-slate-700 mb-1">Game Phase</label>
               <select

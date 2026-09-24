@@ -1,0 +1,13 @@
+{
+  "name": "Wayside Celtic U10s Drill Archive",
+  "short_name": "Wayside Drills",
+  "description": "Training drill archive for Wayside Celtic U10s",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f9fafb",
+  "theme_color": "#164e23",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

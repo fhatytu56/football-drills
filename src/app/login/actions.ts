@@ -2,6 +2,13 @@
 
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
+import { getGroup } from '@/lib/groups'
+
+// Only ever send people back to one of our own group pages.
+function safeNext(raw: FormDataEntryValue | null) {
+  const group = getGroup(String(raw || '').replace(/^\//, ''))
+  return group ? `/${group.id}` : '/'
+}
 
 export async function signInWithPassword(formData: FormData) {
   const supabase = await createClient()
@@ -11,8 +18,11 @@ export async function signInWithPassword(formData: FormData) {
     password: formData.get('password') as string,
   })
 
-  if (error) redirect(`/login?error=${encodeURIComponent(error.message)}`)
-  redirect('/')
+  const next = safeNext(formData.get('next'))
+  if (error) {
+    redirect(`/login?next=${encodeURIComponent(next)}&error=${encodeURIComponent(error.message)}`)
+  }
+  redirect(next)
 }
 
 export async function signUp(formData: FormData) {

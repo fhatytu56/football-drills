@@ -34,6 +34,37 @@ Mobile-first web app to archive and collate youth football training drills.
    npm run dev
    ```
 
+## Age groups
+
+The home page lets people pick U8s, U9s, U10s or U11s. Each group has its own drills and its own two training days (set in `src/lib/groups.ts`):
+
+| Group | Training days |
+|---|---|
+| U8s | Wednesday, Friday |
+| U9s | Tuesday, Friday |
+| U10s | Tuesday, Thursday |
+| U11s | Tuesday, Thursday |
+
+Anyone can view. Only coaches linked to a group can add/delete drills or change that group's session plans.
+
+Database changes live in `supabase/migrations/002_age_groups.sql` (run once in the Supabase SQL Editor).
+
+## Coach accounts
+
+1. Supabase → Authentication → Users → **Add user** → *Create new user*. Enter the coach's email + a password, tick **Auto Confirm User**.
+2. Supabase → SQL Editor, give them their group(s):
+   ```sql
+   insert into coach_groups (user_id, age_group)
+   select id, 'u8' from auth.users where email = 'coach@example.com';
+   ```
+   Use `'u8'`, `'u9'`, `'u10'` or `'u11'`. Run it again with another group to give a coach more than one.
+3. To remove access:
+   ```sql
+   delete from coach_groups
+   where age_group = 'u8'
+     and user_id = (select id from auth.users where email = 'coach@example.com');
+   ```
+
 ## Deploy (Vercel)
 
 1. Push this repo to GitHub.

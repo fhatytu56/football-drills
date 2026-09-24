@@ -1,59 +1,30 @@
-'use client';
-
 import { Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
-
-function LoginForm() {
-  const searchParams = useSearchParams();
-  const message = searchParams.get('message');
-
-  return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-md max-w-sm w-full">
-        <h1 className="text-xl font-bold text-slate-800 mb-2">Wayside Celtic u10s</h1>
-        <p className="text-xs text-slate-500 mb-4">Please log in to manage drills and training sessions.</p>
-        
-        {message && (
-          <div className="mb-4 p-2 bg-amber-50 text-amber-800 text-xs rounded border border-amber-200">
-            {message}
-          </div>
-        )}
-
-        <form action="/auth/login" method="post" className="space-y-3">
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Email</label>
-            <input
-              name="email"
-              type="email"
-              required
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Password</label>
-            <input
-              name="password"
-              type="password"
-              required
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
-            />
-          </div>
-          <button
-            type="submit"
-            className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-lg transition"
-          >
-            Sign In
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
+import Link from 'next/link';
+import { ChevronLeft } from 'lucide-react';
+import LoginForm from '@/components/LoginForm';
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="p-8 text-center text-xs text-slate-500">Loading login...</div>}>
-      <LoginForm />
-    </Suspense>
+    <main className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+      <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-md max-w-sm w-full">
+        <Link href="/" className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-800 mb-4">
+          <ChevronLeft className="w-4 h-4" /> Age groups
+        </Link>
+        <div className="flex items-center gap-3 mb-4">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/crest.jpg" alt="Wayside Celtic F.C. crest" className="w-12 h-12 rounded-full" />
+          <div>
+            <h1 className="text-lg font-bold text-slate-800 leading-tight">Coach sign in</h1>
+            <p className="text-xs text-slate-500">Wayside Celtic Football Drills</p>
+          </div>
+        </div>
+        <p className="text-xs text-slate-500 mb-4">
+          Sign in to add drills and plan sessions for your age group. Ask the club if you need an account.
+        </p>
+        <Suspense fallback={<div className="p-4 text-center text-xs text-slate-500">Loading…</div>}>
+          <LoginForm />
+        </Suspense>
+      </div>
+    </main>
   );
 }

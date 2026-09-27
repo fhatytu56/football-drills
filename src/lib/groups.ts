@@ -7,7 +7,7 @@ export interface AgeGroup {
   days: [TrainingDay, TrainingDay];
   /** Players on the pitch per team, keeper included. */
   aSide: 5 | 7;
-  /** U10s/U11s: each player gets up to 2 outfield positions. */
+  /** U10s/U11s: each player gets a main and a second position (GK, LB, RB, LM, CM, RM, ST). */
   usesPositions: boolean;
 }
 
@@ -18,11 +18,16 @@ export const AGE_GROUPS: AgeGroup[] = [
   { id: 'u11', label: 'U11s', days: ['tuesday', 'thursday'], aSide: 7, usesPositions: true },
 ];
 
-export type Position = 'def' | 'mid' | 'st';
+export type Position = 'gk' | 'lb' | 'rb' | 'lm' | 'cm' | 'rm' | 'st';
 
+/** The 7 spots of the 7-a-side shape (GK, 2 at the back, 3 in midfield, 1 up top). */
 export const POSITIONS: { id: Position; short: string; label: string }[] = [
-  { id: 'def', short: 'DEF', label: 'Defender' },
-  { id: 'mid', short: 'MID', label: 'Midfielder' },
+  { id: 'gk', short: 'GK', label: 'Goalkeeper' },
+  { id: 'lb', short: 'LB', label: 'Left back' },
+  { id: 'rb', short: 'RB', label: 'Right back' },
+  { id: 'lm', short: 'LM', label: 'Left midfield' },
+  { id: 'cm', short: 'CM', label: 'Centre midfield' },
+  { id: 'rm', short: 'RM', label: 'Right midfield' },
   { id: 'st', short: 'ST', label: 'Striker' },
 ];
 

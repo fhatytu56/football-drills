@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Pencil, Plus, Trash2, Check, X, Users } from 'lucide-react';
 import { POSITIONS, type AgeGroup, type Position } from '@/lib/groups';
+import PositionPitch from '@/components/PositionPitch';
 
 interface Team {
   id: string;
@@ -115,12 +116,12 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
     <div className="space-y-4">
       <div className="bg-slate-900 text-white p-4 rounded-xl shadow-md">
         <h2 className="text-sm font-bold flex items-center gap-2">
-          <Users className="w-4 h-4 text-emerald-400" /> {group.label} Squad
+          <Users className="w-4 h-4 text-emerald-400" /> {group.label} Squads
         </h2>
         <p className="text-xs text-slate-300 mt-1">
           {group.label} play {group.aSide}-a-side. {players.length} {players.length === 1 ? 'player' : 'players'} in{' '}
           {teams.length} {teams.length === 1 ? 'team' : 'teams'}.
-          {group.usesPositions && ' Give each player a main and a second position.'}
+          {group.usesPositions && ' Tap a player to set their main and second position on the pitch.'}
         </p>
         <p className="text-[11px] text-slate-400 mt-1">First names only. Only {group.label} coaches can see this.</p>
       </div>
@@ -313,50 +314,7 @@ function PlayerEditor({
 }) {
   const [name, setName] = useState(player.first_name);
   const [teamId, setTeamId] = useState<string>(player.team_id || '');
-  const [main, setMain] = useState<Position | null>(player.positions[0] || null);
-  const [second, setSecond] = useState<Position | null>(player.positions[1] || null);
-
-  const pick = (slot: 'main' | 'second', pos: Position) => {
-    if (slot === 'main') {
-      setMain(main === pos ? null : pos);
-      if (second === pos) setSecond(null);
-    } else {
-      setSecond(second === pos ? null : pos);
-    }
-  };
-
-  const positionRow = (slot: 'main' | 'second', label: string) => {
-    const current = slot === 'main' ? main : second;
-    return (
-      <div className="flex items-center gap-2">
-        <span className="w-16 shrink-0 text-[11px] font-bold text-slate-500 uppercase">{label}</span>
-        <div className="flex gap-1.5 flex-1" role="group" aria-label={`${label} position`}>
-          {POSITIONS.map((p) => {
-            const disabled = slot === 'second' && (!main || main === p.id);
-            const on = current === p.id;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                disabled={disabled}
-                aria-pressed={on}
-                onClick={() => pick(slot, p.id)}
-                className={`flex-1 py-1.5 rounded-lg text-xs font-bold border transition disabled:opacity-30 ${
-                  on
-                    ? slot === 'main'
-                      ? 'bg-emerald-700 text-white border-emerald-700'
-                      : 'bg-slate-700 text-white border-slate-700'
-                    : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                }`}
-              >
-                {p.short}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  };
+  const [positions, setPositions] = useState<Position[]>(player.positions);
 
   return (
     <li className="px-4 py-3 bg-slate-50 space-y-3">
@@ -367,7 +325,7 @@ function PlayerEditor({
           onSave({
             first_name: name,
             team_id: teamId || null,
-            positions: [main, second].filter(Boolean) as Position[],
+            positions,
           });
         }}
       >
@@ -395,12 +353,7 @@ function PlayerEditor({
           </select>
         </div>
 
-        {group.usesPositions && (
-          <div className="space-y-2">
-            {positionRow('main', 'Main')}
-            {positionRow('second', 'Second')}
-          </div>
-        )}
+        {group.usesPositions && <PositionPitch value={positions} onChange={setPositions} />}
 
         <div className="flex items-center gap-2">
           <button

@@ -33,7 +33,7 @@ type CoachTab = 'squad' | 'parents';
 
 // Second tab row, coaches only. Match Day joins this row in a later update.
 const COACH_TABS: { id: CoachTab; label: string }[] = [
-  { id: 'squad', label: 'Squad' },
+  { id: 'squad', label: 'Squads' },
   { id: 'parents', label: 'Parents' },
 ];
 

@@ -118,7 +118,7 @@ export default function ParentsPanel({ group }: { group: AgeGroup }) {
       {teams.length === 0 ? (
         <div className="text-center py-8 bg-white rounded-xl border border-slate-200 p-4">
           <p className="text-slate-500 font-medium text-sm">No teams yet.</p>
-          <p className="text-slate-400 text-xs mt-1">Create a team and add players in the Squad tab first.</p>
+          <p className="text-slate-400 text-xs mt-1">Create a team and add players in the Squads tab first.</p>
         </div>
       ) : formFor === 'new' ? (
         <MatchForm

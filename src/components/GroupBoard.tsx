@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Plus, Trash2, Play, Pause, RotateCcw, ArrowUp, ArrowDown, Timer, Clock, AlertTriangle, X, ExternalLink, ChevronLeft, LogIn, LogOut } from 'lucide-react';
 import AddDrillModal from '@/components/AddDrillModal';
 import SquadPanel from '@/components/SquadPanel';
+import ParentsPanel from '@/components/ParentsPanel';
 import { signOut } from '@/app/login/actions';
 import { DAY_LABEL, SESSION_BUDGET_MINS, type AgeGroup, type TrainingDay } from '@/lib/groups';
 
@@ -28,10 +29,13 @@ interface SessionItem {
   order_index?: number;
 }
 
-type CoachTab = 'squad';
+type CoachTab = 'squad' | 'parents';
 
-// Second tab row, coaches only. Match Day and Parents join this row in later updates.
-const COACH_TABS: { id: CoachTab; label: string }[] = [{ id: 'squad', label: 'Squad' }];
+// Second tab row, coaches only. Match Day joins this row in a later update.
+const COACH_TABS: { id: CoachTab; label: string }[] = [
+  { id: 'squad', label: 'Squad' },
+  { id: 'parents', label: 'Parents' },
+];
 
 interface GroupBoardProps {
   group: AgeGroup;
@@ -358,6 +362,8 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
       <div className="max-w-3xl mx-auto p-4">
         {activeTab === 'squad' ? (
           <SquadPanel group={group} />
+        ) : activeTab === 'parents' ? (
+          <ParentsPanel group={group} />
         ) : loading ? (
           <p className="text-center text-slate-500 py-10">Loading drills...</p>
         ) : activeTab === 'all' && drills.length === 0 ? (

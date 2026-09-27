@@ -40,6 +40,9 @@ create index if not exists idx_players_team on public.players(team_id);
 alter table public.teams enable row level security;
 alter table public.players enable row level security;
 
+-- Signed-in users can reach the tables; the policies below decide which rows.
+grant select, insert, update, delete on public.teams, public.players to authenticated;
+
 do $$
 declare r record;
 begin

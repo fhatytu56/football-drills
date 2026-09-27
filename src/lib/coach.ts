@@ -8,7 +8,9 @@ type Supabase = Awaited<ReturnType<typeof createClient>>;
 export async function getCoachAccess(supabase: Supabase) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return { user: null, groups: [] as string[] };
-  const { data } = await supabase.from('coach_groups').select('age_group').eq('user_id', user.id);
+  const { data, error } = await supabase.from('coach_groups').select('age_group').eq('user_id', user.id);
+  // Shows up in Vercel → Logs if the database refuses the lookup (e.g. missing table permissions).
+  if (error) console.error('coach_groups lookup failed:', error.message);
   return { user, groups: (data || []).map((r: { age_group: string }) => r.age_group) };
 }
 

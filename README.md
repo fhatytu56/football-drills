@@ -55,6 +55,14 @@ Coaches see a second tab row with **Squad**. There they create teams within thei
 
 Only that age group's coaches can see or change its squad. Database: `supabase/migrations/003_teams_squad.sql`.
 
+## Parents (coaches only)
+
+Coaches add a match (team, date, meet time, kick-off, opponent, home/away, location, kit, notes; U8s/U9s can add a second game on the day). **Share to WhatsApp** opens WhatsApp with the message written, ending in a secret link. Parents tap their child's name and Yes/No — no login. The link only shows that team's first names and stops working the day after the match. Coaches can also set answers themselves.
+
+Database: `supabase/migrations/004_matches.sql`. Parents never get table access; they only reach two database functions (`rsvp_match`, `rsvp_answer`) that check the secret link.
+
+**Table permissions:** this Supabase project does not give the app access to new tables automatically. Every migration that creates a table must `grant … to authenticated` (RLS then decides which rows).
+
 ## Coach accounts
 
 1. Supabase → Authentication → Users → **Add user** → *Create new user*. Enter the coach's email + a password, tick **Auto Confirm User**.

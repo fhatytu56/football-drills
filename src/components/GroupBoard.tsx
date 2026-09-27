@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Plus, Trash2, Play, Pause, RotateCcw, ArrowUp, ArrowDown, Timer, Clock, AlertTriangle, X, ExternalLink, ChevronLeft, LogIn, LogOut } from 'lucide-react';
 import AddDrillModal from '@/components/AddDrillModal';
+import SquadPanel from '@/components/SquadPanel';
 import { signOut } from '@/app/login/actions';
 import { DAY_LABEL, SESSION_BUDGET_MINS, type AgeGroup, type TrainingDay } from '@/lib/groups';
 
@@ -27,6 +28,11 @@ interface SessionItem {
   order_index?: number;
 }
 
+type CoachTab = 'squad';
+
+// Second tab row, coaches only. Match Day and Parents join this row in later updates.
+const COACH_TABS: { id: CoachTab; label: string }[] = [{ id: 'squad', label: 'Squad' }];
+
 interface GroupBoardProps {
   group: AgeGroup;
   canEdit: boolean;
@@ -38,7 +44,7 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
   const budget = SESSION_BUDGET_MINS;
   const [drills, setDrills] = useState<Drill[]>([]);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
-  const [activeTab, setActiveTab] = useState<'all' | TrainingDay>('all');
+  const [activeTab, setActiveTab] = useState<'all' | TrainingDay | CoachTab>('all');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -332,10 +338,27 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
             </button>
           ))}
         </div>
+        {canEdit && (
+          <div className="flex bg-slate-200 p-1 rounded-xl gap-1 mt-2" aria-label="Coach tools">
+            {COACH_TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setActiveTab(t.id)}
+                className={`flex-1 py-2 text-xs font-bold rounded-lg transition ${
+                  activeTab === t.id ? 'bg-white text-emerald-800 shadow' : 'text-slate-600'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="max-w-3xl mx-auto p-4">
-        {loading ? (
+        {activeTab === 'squad' ? (
+          <SquadPanel group={group} />
+        ) : loading ? (
           <p className="text-center text-slate-500 py-10">Loading drills...</p>
         ) : activeTab === 'all' && drills.length === 0 ? (
           <div className="text-center py-10 bg-white rounded-xl border border-slate-200 p-4">

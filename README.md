@@ -49,6 +49,12 @@ Anyone can view. Only coaches linked to a group can add/delete drills or change 
 
 Database changes live in `supabase/migrations/002_age_groups.sql` (run once in the Supabase SQL Editor).
 
+## Squad (coaches only)
+
+Coaches see a second tab row with **Squad**. There they create teams within their age group (e.g. 10.1, 10.2), add players (first name only) and move players between teams. U10s and U11s players get a main and a second outfield position (DEF / MID / ST). Deleting a team keeps its players under "No team yet".
+
+Only that age group's coaches can see or change its squad. Database: `supabase/migrations/003_teams_squad.sql`.
+
 ## Coach accounts
 
 1. Supabase → Authentication → Users → **Add user** → *Create new user*. Enter the coach's email + a password, tick **Auto Confirm User**.

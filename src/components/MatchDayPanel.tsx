@@ -26,7 +26,12 @@ import {
   startNextPeriod,
   subDue,
   swap,
+  suggestPlan,
+  plannedMinutes,
+  planTimes,
+  nextPlanned,
   type MatchDayState,
+  type PlannedSub,
   type Spot,
 } from '@/lib/matchday';
 
@@ -49,6 +54,15 @@ interface Match {
   opponent_2: string | null;
   kickoff_2: string | null;
   home_away: 'home' | 'away';
+}
+
+interface SavedPlan {
+  here: string[];
+  lineup: Record<string, string | null>;
+  bench: string[];
+  sub_gap: number;
+  subs: PlannedSub[];
+  updated_at: string;
 }
 
 const SHORT = Object.fromEntries(POSITIONS.map((p) => [p.id, p.short])) as Record<Position, string>;
@@ -250,6 +264,7 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
   const [choice, setChoice] = useState<{ matchId: string | null; teamId: string } | null>(null);
   const [here, setHere] = useState<string[]>([]);
   const [gap, setGap] = useState(5);
+  const [savedPlan, setSavedPlan] = useState<SavedPlan | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -271,14 +286,29 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
   const today = todayInIreland();
   const upcoming = matches.filter((m) => m.match_date >= today).slice(0, 6);
 
-  const pick = (matchId: string | null, teamId: string) => {
+  const pick = async (matchId: string | null, teamId: string) => {
     setChoice({ matchId, teamId });
+    setSavedPlan(null);
     const squad = players.filter((p) => p.team_id === teamId);
     const yes = matchId
       ? squad.filter((p) => answers.some((a) => a.match_id === matchId && a.player_id === p.id && a.answer === 'yes'))
       : [];
     // No answers yet (or a quick game): tick everyone, the coach unticks who's missing.
     setHere((yes.length ? yes : squad).map((p) => p.id));
+    if (!matchId) return;
+    // A coach may already have made a sub plan for this match (maybe on another phone).
+    try {
+      const r = await fetch(`/api/plans?match_id=${matchId}`);
+      const data = await r.json();
+      if (r.ok && data.plan) {
+        const ids = new Set(squad.map((p) => p.id));
+        setSavedPlan(data.plan);
+        setHere((data.plan.here as string[]).filter((id) => ids.has(id)));
+        setGap(data.plan.sub_gap);
+      }
+    } catch {
+      /* no saved plan: carry on */
+    }
   };
 
   if (loading) return <p className="text-center text-slate-500 py-10">Loading...</p>;
@@ -426,6 +456,15 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
               </button>
               <span className="text-sm font-semibold text-slate-600">minutes</span>
             </div>
+            {savedPlan && (
+              <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2 mt-3" role="status">
+                A coach saved a sub plan for this match ({new Date(savedPlan.updated_at).toLocaleString('en-IE', {
+                  weekday: 'short',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}). It opens on the next step.
+              </p>
+            )}
             {benchCount === 0 && here.length > 0 && (
               <p className="text-xs text-amber-700 mt-2">Nobody on the bench, so there won&apos;t be any sub alerts.</p>
             )}
@@ -435,7 +474,23 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
             disabled={here.length === 0}
             onClick={() => {
               const chosen = players.filter((p) => here.includes(p.id));
-              const { onPitch, bench } = autoLineup(format.spots, chosen, group.usesPositions);
+              let { onPitch, bench } = autoLineup(format.spots, chosen, group.usesPositions);
+              let plan: PlannedSub[];
+              if (savedPlan) {
+                // Use the saved line-up for whoever's here; anyone new goes to the bench.
+                const hereSet = new Set(chosen.map((p) => p.id));
+                const saved: Partial<Record<Spot, string | null>> = {};
+                for (const sp of format.spots) {
+                  const id = (savedPlan.lineup as Record<string, string | null>)[sp];
+                  saved[sp] = id && hereSet.has(id) ? id : null;
+                }
+                const placed = new Set(Object.values(saved).filter(Boolean) as string[]);
+                onPitch = saved;
+                bench = chosen.map((p) => p.id).filter((id) => !placed.has(id));
+                plan = savedPlan.subs.filter((x) => hereSet.has(x.on) && hereSet.has(x.off));
+              } else {
+                plan = suggestPlan(format, gap, onPitch, bench, chosen, group.usesPositions);
+              }
               onReady({
                 version: 1,
                 groupId: group.id,
@@ -454,6 +509,8 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
                 lastSubMs: 0,
                 snoozeUntilMs: 0,
                 stints: [],
+                plan,
+                subsMade: 0,
               });
             }}
             className="w-full bg-emerald-800 hover:bg-emerald-900 disabled:opacity-40 text-white text-sm font-bold py-3 rounded-xl"
@@ -513,6 +570,8 @@ function Game({
     ((selected.playerId && selected.playerId === item.playerId) || (!selected.playerId && !item.playerId && selected.spot === item.spot));
 
   const benchSorted = [...state.bench].sort((a, b) => mins(a) - mins(b));
+  const planned = state.phase === 'playing' ? nextPlanned(state) : null;
+  const spotOf = (id: string) => state.format.spots.find((sp) => state.onPitch[sp] === id);
   const periodLeft = state.format.halfMins * 60_000 - periodMs(state, now);
 
   return (
@@ -577,6 +636,12 @@ function Game({
             <span className="text-slate-400">every {state.subGapMins} min</span>
           </div>
         )}
+        {state.phase === 'playing' && planned && !due && (
+          <p className="text-xs text-slate-300 mt-1" aria-label="Up next">
+            Up next (sub {planned.number}): <b className="text-white">{name(planned.sub.on)}</b> on for{' '}
+            <b className="text-white">{name(planned.sub.off)}</b>
+          </p>
+        )}
         <div className="flex gap-2 mt-3">
           {state.phase === 'lineup' && (
             <button
@@ -621,15 +686,44 @@ function Game({
       {due && (
         <div role="alert" className="bg-amber-400 text-slate-900 rounded-xl p-4 shadow-lg border-2 border-amber-600 animate-pulse">
           <p className="font-black text-lg flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5" /> Sub due
+            <AlertTriangle className="w-5 h-5" /> Sub due{planned ? ` · sub ${planned.number}` : ''}
           </p>
-          <p className="text-sm font-semibold mt-1">Tap who&apos;s coming off, then who&apos;s going on.</p>
-          <button
-            onClick={() => act(snooze)}
-            className="mt-3 bg-slate-900/10 hover:bg-slate-900/20 text-slate-900 text-xs font-bold px-3 py-2 rounded-lg"
-          >
-            Not now (1 min)
-          </button>
+          {planned && planned.ok ? (
+            <>
+              <p className="text-base font-bold mt-1">
+                {name(planned.sub.on)} ON for {name(planned.sub.off)}
+                {spotOf(planned.sub.off) ? ` (${SHORT[spotOf(planned.sub.off)!]})` : ''}
+              </p>
+              <p className="text-xs font-semibold mt-1">Or tap different players: who&apos;s coming off, then who&apos;s going on.</p>
+            </>
+          ) : planned ? (
+            <p className="text-sm font-semibold mt-1">
+              Plan said {name(planned.sub.on)} on for {name(planned.sub.off)}, but{' '}
+              {planned.why === 'is already off' ? name(planned.sub.off) : name(planned.sub.on)} {planned.why}. Tap who&apos;s
+              coming off, then who&apos;s going on.
+            </p>
+          ) : (
+            <p className="text-sm font-semibold mt-1">Tap who&apos;s coming off, then who&apos;s going on.</p>
+          )}
+          <div className="flex gap-2 mt-3">
+            {planned && planned.ok && (
+              <button
+                onClick={() => {
+                  setSelected(null);
+                  act((st, t) => swap(st, { playerId: planned.sub.off }, { playerId: planned.sub.on }, t));
+                }}
+                className="bg-slate-900 text-white text-sm font-black px-4 py-2 rounded-lg"
+              >
+                Done
+              </button>
+            )}
+            <button
+              onClick={() => act(snooze)}
+              className="bg-slate-900/10 hover:bg-slate-900/20 text-slate-900 text-xs font-bold px-3 py-2 rounded-lg"
+            >
+              Not now (1 min)
+            </button>
+          </div>
         </div>
       )}
 
@@ -717,6 +811,11 @@ function Game({
         </section>
       )}
 
+      {state.phase === 'lineup' && <PlanEditor state={state} act={act} name={name} />}
+      {(state.phase === 'playing' || state.phase === 'break') && (state.plan?.length || 0) > 0 && (
+        <PlanList state={state} name={name} />
+      )}
+
       {/* full time: minutes */}
       {state.phase === 'fulltime' && (
         <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
@@ -747,4 +846,207 @@ function spotXY(spot: Spot, count: number) {
   if (count === 5 && spot === 'lm') return { x: 28, y: 36 };
   if (count === 5 && spot === 'rm') return { x: 72, y: 36 };
   return SPOTS[spot];
+}
+
+
+// ---------- sub plan: edit before kick-off, follow during the game ----------
+
+function PlanEditor({
+  state,
+  act,
+  name,
+}: {
+  state: MatchDayState;
+  act: (fn: (s: MatchDayState, now: number) => MatchDayState) => void;
+  name: (id: string | null | undefined) => string;
+}) {
+  const plan = state.plan || [];
+  const times = planTimes(state.format, state.subGapMins, plan.length);
+  const minutes = plannedMinutes(state.format, state.subGapMins, state.onPitch, plan);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveMsg, setSaveMsg] = useState('');
+  const sig = JSON.stringify([state.onPitch, state.bench, plan, state.subGapMins]);
+  const [savedSig, setSavedSig] = useState<string | null>(null);
+  const dirty = savedSig !== sig;
+  const byName = [...state.players].sort((a, b) => a.first_name.localeCompare(b.first_name));
+  const usePositions = state.format.spots.length === 7;
+
+  const setPlan = (next: PlannedSub[]) => act((s) => ({ ...s, plan: next }));
+  const setRow = (i: number, key: 'on' | 'off', id: string) => setPlan(plan.map((x, j) => (j === i ? { ...x, [key]: id } : x)));
+
+  const save = async () => {
+    if (!state.matchId) return;
+    setSaveState('saving');
+    try {
+      const r = await fetch('/api/plans', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          match_id: state.matchId,
+          here: state.players.map((p) => p.id),
+          lineup: state.onPitch,
+          bench: state.bench,
+          sub_gap: state.subGapMins,
+          subs: plan,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error);
+      setSavedSig(sig);
+      setSaveState('saved');
+      setSaveMsg('');
+    } catch (e: any) {
+      setSaveState('error');
+      setSaveMsg(e.message || 'Could not save');
+    }
+  };
+
+  return (
+    <section className="bg-white rounded-xl border border-slate-200 shadow-sm" aria-label="Sub plan">
+      <header className="px-4 pt-3 pb-2 border-b border-slate-100 flex items-center justify-between gap-2">
+        <div>
+          <h3 className="font-bold text-slate-900 text-sm">Sub plan</h3>
+          <p className="text-xs text-slate-500">
+            {plan.length} {plan.length === 1 ? 'sub' : 'subs'}, one every {state.subGapMins} min. Change any pair.
+          </p>
+        </div>
+        <button
+          onClick={() =>
+            setPlan(suggestPlan(state.format, state.subGapMins, state.onPitch, state.bench, state.players, usePositions))
+          }
+          className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 rounded-lg shrink-0"
+        >
+          Suggest again
+        </button>
+      </header>
+
+      {plan.length === 0 ? (
+        <p className="px-4 py-3 text-xs text-slate-400">No subs planned{state.bench.length ? '' : ' — nobody on the bench'}.</p>
+      ) : (
+        <ol className="divide-y divide-slate-100">
+          {plan.map((x, i) => (
+            <li key={i} className="px-3 py-2 flex items-center gap-2 text-sm">
+              <span className="w-12 shrink-0 text-[11px] font-bold text-slate-500 leading-tight">
+                Sub {i + 1}
+                <br />~{times[i]}′
+              </span>
+              <select
+                aria-label={`Sub ${i + 1} on`}
+                value={x.on}
+                onChange={(e) => setRow(i, 'on', e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1.5 border border-emerald-300 bg-emerald-50 rounded-lg text-sm font-semibold text-emerald-900"
+              >
+                {byName.map((p) => (
+                  <option key={p.id} value={p.id} disabled={p.id === x.off}>{p.first_name}</option>
+                ))}
+              </select>
+              <span className="text-[11px] font-bold text-slate-400 shrink-0">on for</span>
+              <select
+                aria-label={`Sub ${i + 1} off`}
+                value={x.off}
+                onChange={(e) => setRow(i, 'off', e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1.5 border border-slate-300 rounded-lg text-sm font-semibold text-slate-800"
+              >
+                {byName.map((p) => (
+                  <option key={p.id} value={p.id} disabled={p.id === x.on}>{p.first_name}</option>
+                ))}
+              </select>
+              <button
+                aria-label={`Remove sub ${i + 1}`}
+                onClick={() => setPlan(plan.filter((_, j) => j !== i))}
+                className="text-slate-300 hover:text-red-600 px-1 text-lg leading-none"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {plan.length > 0 && (
+        <div className="px-4 py-3 border-t border-slate-100">
+          <p className="text-[11px] font-bold uppercase text-slate-500 mb-1.5">Minutes if the plan runs on time</p>
+          <div className="flex flex-wrap gap-1.5" aria-label="Planned minutes">
+            {[...state.players]
+              .sort((a, b) => (minutes[a.id] || 0) - (minutes[b.id] || 0))
+              .map((p) => (
+                <span key={p.id} className="text-xs font-semibold bg-slate-100 text-slate-700 rounded-md px-2 py-1">
+                  {p.first_name} {Math.round(minutes[p.id] || 0)}′
+                </span>
+              ))}
+          </div>
+        </div>
+      )}
+
+      <div className="px-4 pb-4 pt-1 flex items-center gap-3">
+        {state.bench.length > 0 && (
+          <button
+            onClick={() => {
+              const last = plan[plan.length - 1];
+              const on = state.bench[0];
+              const off = state.format.spots.map((sp) => state.onPitch[sp]).find((id) => id && id !== on) || '';
+              if (on && off) setPlan([...plan, last ? { on: last.off, off: last.on } : { on, off }]);
+            }}
+            className="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg"
+          >
+            + Add sub
+          </button>
+        )}
+        <div className="flex-1" />
+        {state.matchId ? (
+          <button
+            onClick={save}
+            disabled={saveState === 'saving' || (!dirty && saveState === 'saved')}
+            className="text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 px-4 py-2 rounded-lg"
+          >
+            {saveState === 'saving' ? 'Saving…' : !dirty && saveState === 'saved' ? 'Saved ✓' : 'Save plan'}
+          </button>
+        ) : (
+          <span className="text-[11px] text-slate-400">Quick game: plan stays on this phone.</span>
+        )}
+      </div>
+      {state.matchId && (
+        <p className={`px-4 pb-3 -mt-2 text-[11px] ${saveState === 'error' ? 'text-red-600 font-semibold' : 'text-slate-400'}`} role="status">
+          {saveState === 'error'
+            ? saveMsg
+            : !dirty && saveState === 'saved'
+            ? 'Saved. Other coaches of this group see it when they open this match.'
+            : 'Save to share the line-up and plan with the other coaches.'}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function PlanList({ state, name }: { state: MatchDayState; name: (id: string | null | undefined) => string }) {
+  const [open, setOpen] = useState(false);
+  const plan = state.plan || [];
+  const done = Math.min(state.subsMade || 0, plan.length);
+  return (
+    <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+      <button
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="w-full px-4 py-2.5 flex justify-between text-xs font-bold text-slate-600"
+      >
+        <span>Sub plan · {done} of {plan.length} made</span>
+        <span>{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open && (
+        <ol className="divide-y divide-slate-100 border-t border-slate-100">
+          {plan.map((x, i) => (
+            <li
+              key={i}
+              className={`px-4 py-1.5 text-xs flex gap-2 ${
+                i < done ? 'text-slate-400 line-through' : i === done ? 'font-bold text-slate-900 bg-amber-50' : 'text-slate-600'
+              }`}
+            >
+              <span className="w-12">Sub {i + 1}</span>
+              {name(x.on)} on for {name(x.off)}
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
 }

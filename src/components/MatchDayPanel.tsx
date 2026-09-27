@@ -171,6 +171,7 @@ function useWakeLock(active: boolean) {
 export default function MatchDayPanel({ group }: { group: AgeGroup }) {
   const [state, setState] = useState<MatchDayState | null>(null);
   const [restored, setRestored] = useState(false);
+  const [draft, setDraft] = useState<MatchDayState | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const { unlock, beep } = useBeeper();
 
@@ -230,7 +231,18 @@ export default function MatchDayPanel({ group }: { group: AgeGroup }) {
   };
 
   if (!restored) return null;
-  if (!state) return <Setup group={group} onReady={(s) => setState(s)} />;
+  if (!state)
+    return (
+      <Setup
+        group={group}
+        draft={draft}
+        onReady={(s) => {
+          setDraft(null);
+          setState(s);
+        }}
+        onDiscardDraft={() => setDraft(null)}
+      />
+    );
 
   return (
     <Game
@@ -244,6 +256,12 @@ export default function MatchDayPanel({ group }: { group: AgeGroup }) {
         act(kickOff);
       }}
       onFinish={() => {
+        if (state.phase === 'lineup') {
+          // Back to who's-here, keeping the match, players, sub gap, line-up and plan.
+          setDraft(state);
+          setState(null);
+          return;
+        }
         if (state.phase === 'fulltime' || confirm('Leave this match? Its clock and minutes will be cleared.')) setState(null);
       }}
       group={group}
@@ -253,7 +271,17 @@ export default function MatchDayPanel({ group }: { group: AgeGroup }) {
 
 // ---------- step 1: choose match, who's here, sub gap ----------
 
-function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState) => void }) {
+function Setup({
+  group,
+  draft,
+  onReady,
+  onDiscardDraft,
+}: {
+  group: AgeGroup;
+  draft: MatchDayState | null;
+  onReady: (s: MatchDayState) => void;
+  onDiscardDraft: () => void;
+}) {
   const [teams, setTeams] = useState<Team[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
@@ -261,9 +289,11 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [choice, setChoice] = useState<{ matchId: string | null; teamId: string } | null>(null);
-  const [here, setHere] = useState<string[]>([]);
-  const [gap, setGap] = useState(5);
+  const [choice, setChoice] = useState<{ matchId: string | null; teamId: string } | null>(
+    draft?.teamId ? { matchId: draft.matchId, teamId: draft.teamId } : null
+  );
+  const [here, setHere] = useState<string[]>(draft ? draft.players.map((p) => p.id) : []);
+  const [gap, setGap] = useState(draft?.subGapMins ?? 5);
   const [savedPlan, setSavedPlan] = useState<SavedPlan | null>(null);
 
   useEffect(() => {
@@ -397,7 +427,13 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
                 </h3>
                 <p className="text-xs text-slate-500">Who&apos;s here? {here.length} ticked · {onCount} on, {benchCount} on the bench</p>
               </div>
-              <button onClick={() => setChoice(null)} className="text-xs font-bold text-slate-500 flex items-center">
+              <button
+                onClick={() => {
+                  setChoice(null);
+                  onDiscardDraft();
+                }}
+                className="text-xs font-bold text-slate-500 flex items-center"
+              >
                 <ChevronLeft className="w-4 h-4" /> Back
               </button>
             </header>
@@ -476,7 +512,21 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
               const chosen = players.filter((p) => here.includes(p.id));
               let { onPitch, bench } = autoLineup(format.spots, chosen, group.usesPositions);
               let plan: PlannedSub[];
-              if (savedPlan) {
+              const sameAsDraft =
+                !!draft &&
+                draft.teamId === choice.teamId &&
+                draft.matchId === (match?.id || null) &&
+                draft.players.length === chosen.length &&
+                chosen.every((p) => draft.players.some((d) => d.id === p.id));
+              if (draft && sameAsDraft) {
+                // Came back with Back and changed nothing about who's here: keep line-up and plan.
+                onPitch = draft.onPitch;
+                bench = draft.bench;
+                plan =
+                  draft.subGapMins === gap
+                    ? draft.plan || []
+                    : suggestPlan(format, gap, onPitch, bench, chosen, group.usesPositions);
+              } else if (savedPlan) {
                 // Use the saved line-up for whoever's here; anyone new goes to the bench.
                 const hereSet = new Set(chosen.map((p) => p.id));
                 const saved: Partial<Record<Spot, string | null>> = {};
@@ -495,6 +545,7 @@ function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState
                 version: 1,
                 groupId: group.id,
                 matchId: match?.id || null,
+                teamId: choice.teamId,
                 title: match ? matchTitle({ ...match, team: teamName(match.team_id) }) : `${teamName(choice.teamId)} · quick game`,
                 format,
                 subGapMins: gap,
@@ -615,7 +666,15 @@ function Game({
             <p className="text-sm font-bold truncate">{state.title}</p>
           </div>
           <button onClick={onFinish} className="text-[11px] font-bold text-slate-400 hover:text-white shrink-0">
-            {state.phase === 'fulltime' ? 'Done' : 'Leave'}
+            {state.phase === 'fulltime' ? (
+              'Done'
+            ) : state.phase === 'lineup' ? (
+              <span className="flex items-center">
+                <ChevronLeft className="w-4 h-4" /> Back
+              </span>
+            ) : (
+              'Leave'
+            )}
           </button>
         </div>
         <div className="flex items-end justify-between gap-3 mt-2">
@@ -871,7 +930,22 @@ function PlanEditor({
   const byName = [...state.players].sort((a, b) => a.first_name.localeCompare(b.first_name));
   const usePositions = state.format.spots.length === 7;
 
-  const setPlan = (next: PlannedSub[]) => act((s) => ({ ...s, plan: next }));
+  const setPlan = (next: PlannedSub[]) => {
+    setRegapped(false);
+    act((s) => ({ ...s, plan: next }));
+  };
+  const [regapped, setRegapped] = useState(false);
+  // New gap: the number and timing of subs change, so the plan is suggested again for it.
+  const setGap = (g: number) => {
+    const gap = Math.min(state.format.halfMins, Math.max(1, g));
+    if (gap === state.subGapMins) return;
+    setRegapped(true);
+    act((s) => ({
+      ...s,
+      subGapMins: gap,
+      plan: suggestPlan(s.format, gap, s.onPitch, s.bench, s.players, usePositions),
+    }));
+  };
   const setRow = (i: number, key: 'on' | 'off', id: string) => setPlan(plan.map((x, j) => (j === i ? { ...x, [key]: id } : x)));
 
   const save = async () => {
@@ -903,12 +977,45 @@ function PlanEditor({
 
   return (
     <section className="bg-white rounded-xl border border-slate-200 shadow-sm" aria-label="Sub plan">
+      <div className="px-4 pt-3 pb-3 border-b border-slate-100 flex items-center gap-2">
+        <label htmlFor="plan-gap" className="text-xs font-bold uppercase text-slate-500 mr-auto">
+          Sub every
+        </label>
+        <button
+          type="button"
+          aria-label="Sub gap one minute less"
+          onClick={() => setGap(state.subGapMins - 1)}
+          className="w-10 h-10 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
+        >
+          <Minus className="w-4 h-4" />
+        </button>
+        <input
+          id="plan-gap"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={state.format.halfMins}
+          value={state.subGapMins}
+          onChange={(e) => setGap(parseInt(e.target.value) || 1)}
+          className="w-14 h-10 text-center text-lg font-black text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
+        />
+        <button
+          type="button"
+          aria-label="Sub gap one minute more"
+          onClick={() => setGap(state.subGapMins + 1)}
+          className="w-10 h-10 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
+        >
+          <Plus className="w-4 h-4" />
+        </button>
+        <span className="text-sm font-semibold text-slate-600">min</span>
+      </div>
       <header className="px-4 pt-3 pb-2 border-b border-slate-100 flex items-center justify-between gap-2">
         <div>
           <h3 className="font-bold text-slate-900 text-sm">Sub plan</h3>
           <p className="text-xs text-slate-500">
-            {plan.length} {plan.length === 1 ? 'sub' : 'subs'}, one every {state.subGapMins} min. Change any pair.
+            {plan.length} {plan.length === 1 ? 'sub' : 'subs'}. Change any pair.
           </p>
+          {regapped && <p className="text-[11px] text-emerald-700 font-semibold">Re-planned for every {state.subGapMins} min.</p>}
         </div>
         <button
           onClick={() =>

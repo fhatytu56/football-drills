@@ -58,6 +58,8 @@ export interface MatchDayState {
   lastSubMs: number; // match ms of the last sub (or kick-off)
   snoozeUntilMs: number; // match ms
   stints: Stint[];
+  /** The team playing (lets "Back" return to the who's-here step). */
+  teamId?: string;
   /** Planned subs in order (from the saved sub plan). Empty = no plan. */
   plan?: PlannedSub[];
   /** How many subs have been made so far = which plan step is next. */

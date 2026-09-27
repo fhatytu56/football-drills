@@ -34,9 +34,9 @@ type CoachTab = 'matchday' | 'squad' | 'parents';
 
 // Second tab row, coaches only.
 const COACH_TABS: { id: CoachTab; label: string }[] = [
-  { id: 'matchday', label: 'Match Day' },
   { id: 'squad', label: 'Squads' },
   { id: 'parents', label: 'Parents' },
+  { id: 'matchday', label: 'Match Day' },
 ];
 
 interface GroupBoardProps {

@@ -1,0 +1,750 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Play, Pause, Minus, Plus, Timer, AlertTriangle, Smartphone, Flag, ChevronLeft, Check } from 'lucide-react';
+import { POSITIONS, type AgeGroup, type Position } from '@/lib/groups';
+import { hhmm, matchTitle, shortDate, todayInIreland } from '@/lib/matches';
+import { SPOTS } from '@/components/PositionPitch';
+import {
+  autoLineup,
+  endEarly,
+  endPeriod,
+  fmtClock,
+  fmtCountdown,
+  formatFor,
+  keeperCandidates,
+  kickOff,
+  matchMs,
+  minutesPlayedMs,
+  nextSubInMs,
+  pause,
+  periodLabel,
+  periodMs,
+  periodOver,
+  resume,
+  snooze,
+  startNextPeriod,
+  subDue,
+  swap,
+  type MatchDayState,
+  type Spot,
+} from '@/lib/matchday';
+
+interface Team {
+  id: string;
+  name: string;
+}
+interface Player {
+  id: string;
+  team_id: string | null;
+  first_name: string;
+  positions: Position[];
+}
+interface Match {
+  id: string;
+  team_id: string;
+  match_date: string;
+  kickoff: string;
+  opponent: string;
+  opponent_2: string | null;
+  kickoff_2: string | null;
+  home_away: 'home' | 'away';
+}
+
+const SHORT = Object.fromEntries(POSITIONS.map((p) => [p.id, p.short])) as Record<Position, string>;
+const storageKey = (groupId: string) => `matchday:v1:${groupId}`;
+
+function loadSaved(groupId: string): MatchDayState | null {
+  try {
+    const raw = localStorage.getItem(storageKey(groupId));
+    const s = raw ? (JSON.parse(raw) as MatchDayState) : null;
+    return s && s.version === 1 ? s : null;
+  } catch {
+    return null;
+  }
+}
+function save(groupId: string, s: MatchDayState | null) {
+  try {
+    if (s) localStorage.setItem(storageKey(groupId), JSON.stringify(s));
+    else localStorage.removeItem(storageKey(groupId));
+  } catch {
+    /* storage blocked: the match still runs, it just won't survive a reload */
+  }
+}
+
+// ---------- sound + keep-screen-on ----------
+
+function useBeeper() {
+  const ctx = useRef<AudioContext | null>(null);
+  const unlock = useCallback(() => {
+    try {
+      const AC = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AC) return;
+      if (!ctx.current) ctx.current = new AC();
+      if (ctx.current.state === 'suspended') ctx.current.resume();
+      // a silent blip inside the tap, so iPhones allow sound later
+      const o = ctx.current.createOscillator();
+      const g = ctx.current.createGain();
+      g.gain.value = 0.0001;
+      o.connect(g).connect(ctx.current.destination);
+      o.start();
+      o.stop(ctx.current.currentTime + 0.01);
+    } catch {
+      /* no sound available */
+    }
+  }, []);
+  const beep = useCallback((times = 3) => {
+    const c = ctx.current;
+    if (!c) return;
+    if (c.state === 'suspended') c.resume();
+    for (let i = 0; i < times; i++) {
+      const t0 = c.currentTime + i * 0.35;
+      const o = c.createOscillator();
+      const g = c.createGain();
+      o.type = 'square';
+      o.frequency.value = 1046;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.4, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.25);
+      o.connect(g).connect(c.destination);
+      o.start(t0);
+      o.stop(t0 + 0.26);
+    }
+    try {
+      (window as any).__beeps = ((window as any).__beeps || 0) + 1; // lets tests count alerts
+    } catch {}
+  }, []);
+  return { unlock, beep };
+}
+
+type WakeStatus = 'idle' | 'on' | 'unsupported' | 'failed';
+
+function useWakeLock(active: boolean) {
+  const lock = useRef<any>(null);
+  const [status, setStatus] = useState<WakeStatus>('idle');
+  const request = useCallback(async () => {
+    const wl = (navigator as any).wakeLock;
+    if (!wl) {
+      setStatus('unsupported');
+      return;
+    }
+    try {
+      lock.current = await wl.request('screen');
+      setStatus('on');
+      lock.current.addEventListener?.('release', () => setStatus((s) => (s === 'on' ? 'idle' : s)));
+    } catch {
+      setStatus('failed');
+    }
+  }, []);
+  useEffect(() => {
+    if (!active) {
+      lock.current?.release?.();
+      lock.current = null;
+      return;
+    }
+    request();
+    const onVis = () => {
+      if (document.visibilityState === 'visible') request();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [active, request]);
+  return status;
+}
+
+// ---------- panel ----------
+
+export default function MatchDayPanel({ group }: { group: AgeGroup }) {
+  const [state, setState] = useState<MatchDayState | null>(null);
+  const [restored, setRestored] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const { unlock, beep } = useBeeper();
+
+  useEffect(() => {
+    setState(loadSaved(group.id));
+    setRestored(true);
+  }, [group.id]);
+
+  useEffect(() => {
+    if (restored) save(group.id, state);
+  }, [state, restored, group.id]);
+
+  const live = !!state && (state.phase === 'playing' || state.phase === 'break');
+  const wake = useWakeLock(live);
+
+  // Re-render a few times a second; the time itself always comes from Date.now().
+  useEffect(() => {
+    if (!state || state.phase === 'lineup' || state.phase === 'fulltime') return;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    const onVis = () => setNow(Date.now());
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [state]);
+
+  // Whistle: end of half / game / match.
+  useEffect(() => {
+    if (state && periodOver(state, now)) {
+      setState(endPeriod(state, now));
+      beep(4);
+    }
+  }, [state, now, beep]);
+
+  // Sub due: beep once when it becomes due, then every 30s until the coach acts.
+  const lastAlert = useRef<number>(0);
+  const due = !!state && subDue(state, now);
+  useEffect(() => {
+    if (!state) return;
+    if (!due) {
+      lastAlert.current = 0;
+      return;
+    }
+    const t = matchMs(state, now);
+    if (lastAlert.current === 0 || t - lastAlert.current >= 30_000) {
+      lastAlert.current = t || 1;
+      beep(3);
+    }
+  }, [due, state, now, beep]);
+
+  const act = (fn: (s: MatchDayState, now: number) => MatchDayState) => {
+    unlock();
+    const t = Date.now();
+    setNow(t);
+    setState((s) => (s ? fn(s, t) : s));
+  };
+
+  if (!restored) return null;
+  if (!state) return <Setup group={group} onReady={(s) => setState(s)} />;
+
+  return (
+    <Game
+      state={state}
+      now={now}
+      due={due}
+      wake={wake}
+      act={act}
+      onKickOff={() => {
+        unlock();
+        act(kickOff);
+      }}
+      onFinish={() => {
+        if (state.phase === 'fulltime' || confirm('Leave this match? Its clock and minutes will be cleared.')) setState(null);
+      }}
+      group={group}
+    />
+  );
+}
+
+// ---------- step 1: choose match, who's here, sub gap ----------
+
+function Setup({ group, onReady }: { group: AgeGroup; onReady: (s: MatchDayState) => void }) {
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [answers, setAnswers] = useState<{ match_id: string; player_id: string; answer: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [choice, setChoice] = useState<{ matchId: string | null; teamId: string } | null>(null);
+  const [here, setHere] = useState<string[]>([]);
+  const [gap, setGap] = useState(5);
+
+  useEffect(() => {
+    Promise.all([
+      fetch(`/api/squad?group=${group.id}`).then((r) => r.json()),
+      fetch(`/api/matches?group=${group.id}`).then((r) => r.json()),
+    ])
+      .then(([sq, m]) => {
+        if (sq.error) throw new Error(sq.error);
+        setTeams(sq.teams || []);
+        setPlayers(sq.players || []);
+        setMatches(m.matches || []);
+        setAnswers(m.answers || []);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, [group.id]);
+
+  const teamName = (id: string) => teams.find((t) => t.id === id)?.name || '?';
+  const today = todayInIreland();
+  const upcoming = matches.filter((m) => m.match_date >= today).slice(0, 6);
+
+  const pick = (matchId: string | null, teamId: string) => {
+    setChoice({ matchId, teamId });
+    const squad = players.filter((p) => p.team_id === teamId);
+    const yes = matchId
+      ? squad.filter((p) => answers.some((a) => a.match_id === matchId && a.player_id === p.id && a.answer === 'yes'))
+      : [];
+    // No answers yet (or a quick game): tick everyone, the coach unticks who's missing.
+    setHere((yes.length ? yes : squad).map((p) => p.id));
+  };
+
+  if (loading) return <p className="text-center text-slate-500 py-10">Loading...</p>;
+
+  const match = choice?.matchId ? matches.find((m) => m.id === choice.matchId) : null;
+  const format = formatFor(group, !!match?.opponent_2);
+  const squad = choice ? players.filter((p) => p.team_id === choice.teamId) : [];
+  const onCount = Math.min(format.spots.length, here.length);
+  const benchCount = Math.max(0, here.length - format.spots.length);
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-slate-900 text-white p-4 rounded-xl shadow-md">
+        <h2 className="text-sm font-bold flex items-center gap-2">
+          <Timer className="w-4 h-4 text-emerald-400" /> {group.label} Match Day
+        </h2>
+        <p className="text-xs text-slate-300 mt-1">
+          {group.aSide}-a-side · {format.halfMins}-min halves
+          {group.aSide === 5 ? ' · two games on the day' : ''}. Pick the match, tick who&apos;s here, set how often to sub.
+        </p>
+      </div>
+
+      {error && (
+        <div role="alert" className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold rounded-lg p-3">
+          {error}
+        </div>
+      )}
+
+      {!choice ? (
+        <>
+          {teams.length === 0 && (
+            <p className="text-center text-slate-400 text-sm py-6">Create a team in Squads first.</p>
+          )}
+          {upcoming.length > 0 && (
+            <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+              <h3 className="px-4 pt-3 pb-2 text-xs font-bold uppercase text-slate-500">Upcoming matches</h3>
+              <ul className="divide-y divide-slate-100">
+                {upcoming.map((m) => {
+                  const yes = answers.filter((a) => a.match_id === m.id && a.answer === 'yes').length;
+                  return (
+                    <li key={m.id}>
+                      <button
+                        onClick={() => pick(m.id, m.team_id)}
+                        className="w-full text-left px-4 py-3 hover:bg-slate-50 flex justify-between items-center gap-3"
+                      >
+                        <span>
+                          <span className="block font-bold text-slate-800 text-sm">
+                            {matchTitle({ ...m, team: teamName(m.team_id) })}
+                          </span>
+                          <span className="block text-xs text-slate-500">
+                            {shortDate(m.match_date)} · KO {hhmm(m.kickoff)} · {yes} said yes
+                          </span>
+                        </span>
+                        <Play className="w-4 h-4 text-emerald-700 shrink-0" />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          )}
+          {teams.length > 0 && (
+            <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
+              <h3 className="text-xs font-bold uppercase text-slate-500 mb-2">Quick game (no match set up)</h3>
+              <div className="flex flex-wrap gap-2">
+                {teams.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => pick(null, t.id)}
+                    className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-bold text-slate-700 hover:bg-emerald-50"
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </>
+      ) : (
+        <>
+          <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+            <header className="px-4 pt-3 pb-2 border-b border-slate-100 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm">
+                  {match ? matchTitle({ ...match, team: teamName(match.team_id) }) : `${teamName(choice.teamId)} · quick game`}
+                </h3>
+                <p className="text-xs text-slate-500">Who&apos;s here? {here.length} ticked · {onCount} on, {benchCount} on the bench</p>
+              </div>
+              <button onClick={() => setChoice(null)} className="text-xs font-bold text-slate-500 flex items-center">
+                <ChevronLeft className="w-4 h-4" /> Back
+              </button>
+            </header>
+            <ul className="grid grid-cols-2 gap-px bg-slate-100">
+              {squad.map((p) => {
+                const on = here.includes(p.id);
+                return (
+                  <li key={p.id} className="bg-white">
+                    <label className="flex items-center gap-2 px-4 py-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() => setHere(on ? here.filter((x) => x !== p.id) : [...here, p.id])}
+                        className="w-4 h-4 accent-emerald-700"
+                      />
+                      <span className={`text-sm font-semibold ${on ? 'text-slate-800' : 'text-slate-400 line-through'}`}>
+                        {p.first_name}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+
+          <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
+            <label htmlFor="sub-gap" className="block text-xs font-bold uppercase text-slate-500 mb-2">
+              Sub every
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                aria-label="One minute less"
+                onClick={() => setGap(Math.max(1, gap - 1))}
+                className="w-11 h-11 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
+              >
+                <Minus className="w-4 h-4" />
+              </button>
+              <input
+                id="sub-gap"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={format.halfMins}
+                value={gap}
+                onChange={(e) => setGap(Math.min(format.halfMins, Math.max(1, parseInt(e.target.value) || 1)))}
+                className="w-16 h-11 text-center text-lg font-black text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
+              />
+              <button
+                type="button"
+                aria-label="One minute more"
+                onClick={() => setGap(Math.min(format.halfMins, gap + 1))}
+                className="w-11 h-11 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+              <span className="text-sm font-semibold text-slate-600">minutes</span>
+            </div>
+            {benchCount === 0 && here.length > 0 && (
+              <p className="text-xs text-amber-700 mt-2">Nobody on the bench, so there won&apos;t be any sub alerts.</p>
+            )}
+          </section>
+
+          <button
+            disabled={here.length === 0}
+            onClick={() => {
+              const chosen = players.filter((p) => here.includes(p.id));
+              const { onPitch, bench } = autoLineup(format.spots, chosen, group.usesPositions);
+              onReady({
+                version: 1,
+                groupId: group.id,
+                matchId: match?.id || null,
+                title: match ? matchTitle({ ...match, team: teamName(match.team_id) }) : `${teamName(choice.teamId)} · quick game`,
+                format,
+                subGapMins: gap,
+                players: chosen.map((p) => ({ id: p.id, first_name: p.first_name, positions: p.positions })),
+                onPitch,
+                bench,
+                period: 0,
+                periodStartMs: 0,
+                bankedMs: 0,
+                runningSince: null,
+                phase: 'lineup',
+                lastSubMs: 0,
+                snoozeUntilMs: 0,
+                stints: [],
+              });
+            }}
+            className="w-full bg-emerald-800 hover:bg-emerald-900 disabled:opacity-40 text-white text-sm font-bold py-3 rounded-xl"
+          >
+            Next: starting line-up
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------- step 2 + 3: line-up and live game ----------
+
+function Game({
+  state,
+  now,
+  due,
+  wake,
+  act,
+  onKickOff,
+  onFinish,
+  group,
+}: {
+  state: MatchDayState;
+  now: number;
+  due: boolean;
+  wake: WakeStatus;
+  act: (fn: (s: MatchDayState, now: number) => MatchDayState) => void;
+  onKickOff: () => void;
+  onFinish: () => void;
+  group: AgeGroup;
+}) {
+  const [selected, setSelected] = useState<{ playerId?: string; spot?: Spot } | null>(null);
+  const name = (id: string | null | undefined) => state.players.find((p) => p.id === id)?.first_name || '';
+  const mins = (id: string) => Math.floor(minutesPlayedMs(state, id, now) / 60_000);
+  const running = state.runningSince !== null;
+  const keeperMissing = !state.onPitch.gk;
+  const gkIdeas = keeperMissing ? keeperCandidates(state.players, state.bench) : [];
+
+  const tap = (item: { playerId?: string; spot?: Spot }) => {
+    if (!selected) {
+      if (!item.playerId && item.spot && !state.onPitch[item.spot]) {
+        setSelected(item); // empty spot: pick who goes there next
+        return;
+      }
+      setSelected(item);
+      return;
+    }
+    const same =
+      (selected.playerId && selected.playerId === item.playerId) || (!selected.playerId && selected.spot === item.spot);
+    if (!same) act((s, t) => swap(s, selected, item, t));
+    setSelected(null);
+  };
+  const isSel = (item: { playerId?: string; spot?: Spot }) =>
+    !!selected &&
+    ((selected.playerId && selected.playerId === item.playerId) || (!selected.playerId && !item.playerId && selected.spot === item.spot));
+
+  const benchSorted = [...state.bench].sort((a, b) => mins(a) - mins(b));
+  const periodLeft = state.format.halfMins * 60_000 - periodMs(state, now);
+
+  return (
+    <div className="space-y-3">
+      {/* keep the screen on */}
+      {state.phase !== 'fulltime' && (
+        <div
+          className={`rounded-xl p-3 text-xs font-semibold flex items-start gap-2 ${
+            wake === 'on' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-amber-50 text-amber-900 border border-amber-300'
+          }`}
+          role="note"
+        >
+          <Smartphone className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            <b>Keep this screen open and your phone unlocked during the match.</b> A locked phone can&apos;t beep for subs
+            (the clock stays right).{' '}
+            {wake === 'on'
+              ? 'Screen will stay on ✓'
+              : wake === 'unsupported' || wake === 'failed'
+              ? 'This browser can’t keep the screen on by itself — turn off Auto-Lock in your phone’s settings for the match.'
+              : 'The screen stays on once you kick off.'}
+          </span>
+        </div>
+      )}
+
+      {/* scoreboard */}
+      <div className="bg-slate-900 text-white rounded-xl p-4 shadow-md">
+        <div className="flex justify-between items-start gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-emerald-300">
+              {state.phase === 'lineup'
+                ? 'Starting line-up'
+                : state.phase === 'fulltime'
+                ? 'Full time'
+                : state.phase === 'break'
+                ? state.period % 2 === 0
+                  ? 'Half-time'
+                  : 'Between games'
+                : periodLabel(state.format.periods, state.period)}
+            </p>
+            <p className="text-sm font-bold truncate">{state.title}</p>
+          </div>
+          <button onClick={onFinish} className="text-[11px] font-bold text-slate-400 hover:text-white shrink-0">
+            {state.phase === 'fulltime' ? 'Done' : 'Leave'}
+          </button>
+        </div>
+        <div className="flex items-end justify-between gap-3 mt-2">
+          <p className="font-mono font-black text-5xl tabular-nums" aria-label="Clock">
+            {fmtClock(state.phase === 'lineup' ? 0 : periodMs(state, now))}
+          </p>
+          <p className="text-xs text-slate-400 pb-2">/ {state.format.halfMins}:00</p>
+        </div>
+        {state.phase === 'playing' && (
+          <div className="flex items-center justify-between gap-2 mt-2 text-xs">
+            <span className="text-slate-300" aria-label="Next sub">
+              {state.bench.length === 0
+                ? 'No subs on the bench'
+                : due
+                ? 'Sub due now'
+                : `Next sub in ${fmtCountdown(Math.min(nextSubInMs(state, now), periodLeft))}`}
+            </span>
+            <span className="text-slate-400">every {state.subGapMins} min</span>
+          </div>
+        )}
+        <div className="flex gap-2 mt-3">
+          {state.phase === 'lineup' && (
+            <button
+              onClick={onKickOff}
+              className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-black py-3 rounded-lg flex items-center justify-center gap-2"
+            >
+              <Play className="w-5 h-5 fill-current" /> Kick off
+            </button>
+          )}
+          {state.phase === 'playing' && (
+            <>
+              <button
+                onClick={() => act(running ? pause : resume)}
+                className={`flex-1 font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 ${
+                  running ? 'bg-amber-500 text-slate-900' : 'bg-emerald-500 text-slate-900'
+                }`}
+              >
+                {running ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                {running ? 'Pause' : 'Resume'}
+              </button>
+              <button
+                onClick={() => confirm('End the match now?') && act(endEarly)}
+                className="px-3 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-bold flex items-center gap-1"
+              >
+                <Flag className="w-4 h-4" /> End
+              </button>
+            </>
+          )}
+          {state.phase === 'break' && (
+            <button
+              onClick={() => act(startNextPeriod)}
+              className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-black py-3 rounded-lg flex items-center justify-center gap-2"
+            >
+              <Play className="w-5 h-5 fill-current" />
+              {state.period % 2 === 0 ? 'Start 2nd half' : `Start Game ${Math.floor(state.period / 2) + 2}`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* sub alert */}
+      {due && (
+        <div role="alert" className="bg-amber-400 text-slate-900 rounded-xl p-4 shadow-lg border-2 border-amber-600 animate-pulse">
+          <p className="font-black text-lg flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5" /> Sub due
+          </p>
+          <p className="text-sm font-semibold mt-1">Tap who&apos;s coming off, then who&apos;s going on.</p>
+          <button
+            onClick={() => act(snooze)}
+            className="mt-3 bg-slate-900/10 hover:bg-slate-900/20 text-slate-900 text-xs font-bold px-3 py-2 rounded-lg"
+          >
+            Not now (1 min)
+          </button>
+        </div>
+      )}
+
+      {state.phase === 'lineup' && (
+        <p className="text-xs text-slate-500 text-center">
+          Tap two players to swap them. Tap a player, then a bench player, to change who starts.
+        </p>
+      )}
+      {keeperMissing && state.phase !== 'fulltime' && (
+        <p className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2 text-center">
+          No keeper yet. Tap the GK spot, then who goes in goal
+          {gkIdeas.length ? ` (GK in their positions: ${gkIdeas.map(name).join(', ')})` : ''}.
+        </p>
+      )}
+
+      {/* pitch */}
+      {state.phase !== 'fulltime' && (
+        <div className="relative mx-auto w-full max-w-[360px] aspect-[4/5] rounded-2xl bg-emerald-600 border-2 border-emerald-700 overflow-hidden select-none" aria-label="Pitch">
+          <div className="absolute inset-2 border-2 border-white/40 rounded-md" aria-hidden />
+          <div className="absolute left-2 right-2 top-1/2 border-t-2 border-white/40" aria-hidden />
+          <div className="absolute left-1/2 top-1/2 w-20 h-20 -ml-10 -mt-10 rounded-full border-2 border-white/40" aria-hidden />
+          <div className="absolute left-1/2 bottom-2 w-32 h-12 -ml-16 border-2 border-b-0 border-white/40" aria-hidden />
+          <div className="absolute left-1/2 top-2 w-32 h-12 -ml-16 border-2 border-t-0 border-white/40" aria-hidden />
+          {state.format.spots.map((spot) => {
+            const pid = state.onPitch[spot] || null;
+            const pos = spotXY(spot, state.format.spots.length);
+            const sel = isSel(pid ? { playerId: pid } : { spot });
+            return (
+              <button
+                key={spot}
+                onClick={() => tap(pid ? { playerId: pid, spot } : { spot })}
+                aria-label={pid ? `${name(pid)} (${SHORT[spot]})` : `Empty ${SHORT[spot]}`}
+                style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+                className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
+              >
+                <span
+                  className={`w-14 h-14 rounded-full flex items-center justify-center text-[11px] font-black leading-tight px-1 text-center shadow-md border-2 transition ${
+                    sel
+                      ? 'bg-amber-300 text-slate-900 border-amber-600 ring-4 ring-amber-200'
+                      : pid
+                      ? 'bg-white text-emerald-900 border-emerald-900'
+                      : 'bg-emerald-700/50 text-white border-dashed border-white'
+                  }`}
+                >
+                  {pid ? name(pid).slice(0, 8) : SHORT[spot]}
+                </span>
+                <span className="mt-0.5 text-[10px] font-bold text-white bg-emerald-900/70 rounded px-1">
+                  {SHORT[spot]}
+                  {pid && state.phase !== 'lineup' ? ` · ${mins(pid)}′` : ''}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* bench */}
+      {state.phase !== 'fulltime' && (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-3">
+          <h3 className="text-xs font-bold uppercase text-slate-500 mb-2">
+            Bench {state.phase !== 'lineup' && <span className="normal-case font-semibold">· fewest minutes first</span>}
+          </h3>
+          {benchSorted.length === 0 ? (
+            <p className="text-xs text-slate-400">Nobody on the bench.</p>
+          ) : (
+            <div className="flex flex-wrap gap-2" aria-label="Bench">
+              {benchSorted.map((pid) => (
+                <button
+                  key={pid}
+                  onClick={() => tap({ playerId: pid })}
+                  className={`px-3 py-2 rounded-lg text-sm font-bold border-2 transition ${
+                    isSel({ playerId: pid })
+                      ? 'bg-amber-300 border-amber-600 text-slate-900'
+                      : gkIdeas.includes(pid)
+                      ? 'bg-white border-amber-400 text-slate-800'
+                      : 'bg-slate-50 border-slate-200 text-slate-800'
+                  }`}
+                >
+                  {name(pid)}
+                  {state.phase !== 'lineup' && <span className="ml-1 text-xs font-semibold text-slate-500">{mins(pid)}′</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* full time: minutes */}
+      {state.phase === 'fulltime' && (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm">
+          <h3 className="px-4 pt-3 pb-2 text-xs font-bold uppercase text-slate-500 flex items-center gap-1">
+            <Check className="w-4 h-4 text-emerald-600" /> Minutes played
+          </h3>
+          <ul className="divide-y divide-slate-100">
+            {[...state.players]
+              .sort((a, b) => minutesPlayedMs(state, b.id, now) - minutesPlayedMs(state, a.id, now))
+              .map((p) => (
+                <li key={p.id} className="px-4 py-2 flex justify-between text-sm">
+                  <span className="font-semibold text-slate-800">{p.first_name}</span>
+                  <span className="font-mono text-slate-600">{fmtClock(minutesPlayedMs(state, p.id, now))}</span>
+                </li>
+              ))}
+          </ul>
+          <p className="px-4 py-2 text-[11px] text-slate-400 border-t border-slate-100">
+            Not saved anywhere — tap Done to clear it from this phone.
+          </p>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/** 5-a-side has no CM/ST: spread the two midfielders wider. */
+function spotXY(spot: Spot, count: number) {
+  if (count === 5 && spot === 'lm') return { x: 28, y: 36 };
+  if (count === 5 && spot === 'rm') return { x: 72, y: 36 };
+  return SPOTS[spot];
+}

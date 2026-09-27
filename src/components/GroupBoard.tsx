@@ -6,6 +6,7 @@ import { Plus, Trash2, Play, Pause, RotateCcw, ArrowUp, ArrowDown, Timer, Clock,
 import AddDrillModal from '@/components/AddDrillModal';
 import SquadPanel from '@/components/SquadPanel';
 import ParentsPanel from '@/components/ParentsPanel';
+import MatchDayPanel from '@/components/MatchDayPanel';
 import { signOut } from '@/app/login/actions';
 import { DAY_LABEL, SESSION_BUDGET_MINS, type AgeGroup, type TrainingDay } from '@/lib/groups';
 
@@ -29,10 +30,11 @@ interface SessionItem {
   order_index?: number;
 }
 
-type CoachTab = 'squad' | 'parents';
+type CoachTab = 'matchday' | 'squad' | 'parents';
 
-// Second tab row, coaches only. Match Day joins this row in a later update.
+// Second tab row, coaches only.
 const COACH_TABS: { id: CoachTab; label: string }[] = [
+  { id: 'matchday', label: 'Match Day' },
   { id: 'squad', label: 'Squads' },
   { id: 'parents', label: 'Parents' },
 ];
@@ -49,6 +51,16 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
   const [drills, setDrills] = useState<Drill[]>([]);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [activeTab, setActiveTab] = useState<'all' | TrainingDay | CoachTab>('all');
+
+  // A match in progress on this phone (e.g. after a reload): go straight back to it.
+  useEffect(() => {
+    if (!canEdit) return;
+    try {
+      if (localStorage.getItem(`matchday:v1:${group.id}`)) setActiveTab('matchday');
+    } catch {
+      /* storage blocked */
+    }
+  }, [canEdit, group.id]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -360,7 +372,9 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
       </div>
 
       <div className="max-w-3xl mx-auto p-4">
-        {activeTab === 'squad' ? (
+        {activeTab === 'matchday' ? (
+          <MatchDayPanel group={group} />
+        ) : activeTab === 'squad' ? (
           <SquadPanel group={group} />
         ) : activeTab === 'parents' ? (
           <ParentsPanel group={group} />

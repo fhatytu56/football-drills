@@ -49,6 +49,16 @@ Anyone can view. Only coaches linked to a group can add/delete drills or change 
 
 Database changes live in `supabase/migrations/002_age_groups.sql` (run once in the Supabase SQL Editor).
 
+## Match Day (coaches only)
+
+Pick an upcoming match (players who said Yes are ticked) or a quick game, untick anyone missing, set **Sub every N minutes**, check the starting line-up (U10s/U11s are placed by main then second position; the keeper spot is left empty if nobody has GK), then **Kick off**.
+
+- Halves: U8s/U9s 12 min, two games if the match has a Game 2; U10s/U11s 25 min, one game.
+- When a sub is due: beep + banner. Nothing changes until the coach taps who's coming off and who's going on. "Not now" snoozes 1 minute.
+- Tap two pitch players to swap spots (not a sub). Bench is sorted by fewest minutes.
+- The clock is worked out from the time on the phone, not by ticking, so it stays right if the phone locks — but a locked phone can't beep. The app asks the phone to keep the screen on and tells coaches to keep it unlocked.
+- Everything lives on the coach's phone (survives a reload); nothing is saved to the database.
+
 ## Squads (coaches only)
 
 Coaches see a second tab row with **Squads**. There they create teams within their age group (e.g. 10.1, 10.2), add players (first name only) and move players between teams. U10s and U11s players get a main and a second position, picked on a mini pitch (GK, LB, RB, LM, CM, RM, ST). Deleting a team keeps its players under "No team yet".

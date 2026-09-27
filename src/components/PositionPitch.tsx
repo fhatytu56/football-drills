@@ -3,7 +3,7 @@
 import { POSITIONS, type Position } from '@/lib/groups';
 
 // Where each spot sits on the mini pitch (percent from left / top). Own goal at the bottom.
-const SPOTS: Record<Position, { x: number; y: number }> = {
+export const SPOTS: Record<Position, { x: number; y: number }> = {
   st: { x: 50, y: 14 },
   lm: { x: 18, y: 40 },
   cm: { x: 50, y: 40 },

@@ -58,6 +58,15 @@ export interface MatchDayState {
   lastSubMs: number; // match ms of the last sub (or kick-off)
   snoozeUntilMs: number; // match ms
   stints: Stint[];
+  /** Planned subs in order (from the saved sub plan). Empty = no plan. */
+  plan?: PlannedSub[];
+  /** How many subs have been made so far = which plan step is next. */
+  subsMade?: number;
+}
+
+export interface PlannedSub {
+  on: string;
+  off: string;
 }
 
 export function matchMs(s: MatchDayState, now: number) {
@@ -196,6 +205,7 @@ export function swap(
     if (goingOff && comingOn) {
       next.lastSubMs = t;
       next.snoozeUntilMs = 0;
+      next.subsMade = (s.subsMade || 0) + 1;
     }
   }
   return next;
@@ -259,4 +269,106 @@ export function endEarly(s: MatchDayState, now: number): MatchDayState {
 
 export function snooze(s: MatchDayState, now: number): MatchDayState {
   return { ...s, snoozeUntilMs: matchMs(s, now) + 60_000 };
+}
+
+
+// ---------- sub plan ----------
+
+/** Sub k (1-based) is due about k x gap minutes into the day's playing time. */
+export function planTimes(format: Format, gapMins: number, count: number) {
+  return Array.from({ length: count }, (_, i) => (i + 1) * gapMins);
+}
+
+/** How many subs fit: one every `gap` minutes, none at or after the final whistle. */
+export function planLength(format: Format, gapMins: number, benchSize: number) {
+  if (benchSize === 0 || gapMins <= 0) return 0;
+  const total = format.halfMins * format.periods;
+  return Math.max(0, Math.ceil(total / gapMins) - 1);
+}
+
+type P = { id: string; positions: Position[] };
+
+/**
+ * Suggest a fair plan. At each sub: the bench player with the fewest minutes comes on;
+ * the outfield player they replace is, for U10s/U11s, preferably one whose spot is in the
+ * newcomer's positions, otherwise whoever has played longest. U10s/U11s keeper stays put.
+ */
+export function suggestPlan(
+  format: Format,
+  gapMins: number,
+  onPitch: Partial<Record<Spot, string | null>>,
+  bench: string[],
+  players: P[],
+  usePositions: boolean
+): PlannedSub[] {
+  const n = planLength(format, gapMins, bench.length);
+  const pitch = { ...onPitch };
+  let benchNow = [...bench];
+  const mins: Record<string, number> = {};
+  const sinceOn: Record<string, number> = {};
+  for (const id of Object.values(pitch)) if (id) { mins[id] = 0; sinceOn[id] = 0; }
+  for (const id of benchNow) mins[id] = 0;
+  const pos = (id: string) => players.find((p) => p.id === id)?.positions || [];
+  const plan: PlannedSub[] = [];
+  let last = 0;
+  for (let k = 1; k <= n; k++) {
+    const t = k * gapMins;
+    for (const id of Object.values(pitch)) if (id) mins[id] += t - last;
+    last = t;
+    if (!benchNow.length) break;
+    const on = [...benchNow].sort((a, b) => mins[a] - mins[b])[0];
+    const spots = format.spots.filter((sp) => pitch[sp] && !(sp === 'gk' && !format.keeperRotates));
+    if (!spots.length) break;
+    const byMinutes = [...spots].sort(
+      (a, b) => mins[pitch[b]!] - mins[pitch[a]!] || sinceOn[pitch[a]!] - sinceOn[pitch[b]!]
+    );
+    let spot = byMinutes[0];
+    if (usePositions) {
+      const fit = byMinutes.find((sp) => pos(on).includes(sp));
+      // take a like-for-like spot unless that player has had clearly less time (> one gap)
+      if (fit && mins[pitch[fit]!] >= mins[pitch[spot]!] - gapMins) spot = fit;
+    }
+    const off = pitch[spot]!;
+    pitch[spot] = on;
+    sinceOn[on] = t;
+    benchNow = benchNow.filter((x) => x !== on).concat(off);
+    plan.push({ on, off });
+  }
+  return plan;
+}
+
+/** Minutes each player would get if the plan runs on time. */
+export function plannedMinutes(
+  format: Format,
+  gapMins: number,
+  onPitch: Partial<Record<Spot, string | null>>,
+  plan: PlannedSub[]
+) {
+  const total = format.halfMins * format.periods;
+  const on = new Set(Object.values(onPitch).filter(Boolean) as string[]);
+  const mins: Record<string, number> = {};
+  let last = 0;
+  plan.forEach((sub, i) => {
+    const t = Math.min((i + 1) * gapMins, total);
+    for (const id of on) mins[id] = (mins[id] || 0) + (t - last);
+    last = t;
+    if (on.has(sub.off) && !on.has(sub.on)) {
+      on.delete(sub.off);
+      on.add(sub.on);
+    }
+  });
+  for (const id of on) mins[id] = (mins[id] || 0) + (total - last);
+  return mins;
+}
+
+/** The planned sub that's next, and whether it can still happen right now. */
+export function nextPlanned(s: MatchDayState): { sub: PlannedSub; number: number; ok: boolean; why?: string } | null {
+  const plan = s.plan || [];
+  const i = s.subsMade || 0;
+  if (i >= plan.length) return null;
+  const sub = plan[i];
+  const onPitch = s.format.spots.some((sp) => s.onPitch[sp] === sub.off);
+  const onBench = s.bench.includes(sub.on);
+  const why = !onPitch ? 'is already off' : !onBench ? 'is already on' : undefined;
+  return { sub, number: i + 1, ok: onPitch && onBench, why };
 }

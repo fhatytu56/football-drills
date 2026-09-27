@@ -57,7 +57,8 @@ Pick an upcoming match (players who said Yes are ticked) or a quick game, untick
 - When a sub is due: beep + banner. Nothing changes until the coach taps who's coming off and who's going on. "Not now" snoozes 1 minute.
 - Tap two pitch players to swap spots (not a sub). Bench is sorted by fewest minutes.
 - The clock is worked out from the time on the phone, not by ticking, so it stays right if the phone locks — but a locked phone can't beep. The app asks the phone to keep the screen on and tells coaches to keep it unlocked.
-- Everything lives on the coach's phone (survives a reload); nothing is saved to the database.
+- The live match lives on the coach's phone (survives a reload).
+- **Sub plan:** on the line-up screen the app suggests a fair order (fewest minutes comes on; U10s/U11s like-for-like where possible, keeper left alone) with the minutes each player would get. Change any pair, remove or add subs, then **Save plan** — it's stored per match (`match_plans`, migration 006) and the other coaches of that group get it when they open the match. During the game the sub banner shows the planned pair with **Done**; the coach can always tap different players instead, and the plan carries on with the next sub. Quick games get a plan too, but it stays on that phone.
 
 ## Squads (coaches only)
 

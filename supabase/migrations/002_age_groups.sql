@@ -69,6 +69,8 @@ drop policy if exists "Coaches read own groups" on public.coach_groups;
 create policy "Coaches read own groups" on public.coach_groups
   for select using (auth.uid() = user_id);
 -- No insert/update/delete policies: only the Supabase dashboard can change coach access.
+-- The app needs to read it (RLS limits each coach to their own rows).
+grant select on public.coach_groups to authenticated;
 
 create or replace function public.is_group_coach(g text)
 returns boolean

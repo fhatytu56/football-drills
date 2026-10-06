@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Pencil, Plus, Trash2, Check, X, Users } from 'lucide-react';
-import { POSITIONS, type AgeGroup, type Position } from '@/lib/groups';
+import { POSITIONS, teamHint, type AgeGroup, type Position } from '@/lib/groups';
 import PositionPitch from '@/components/PositionPitch';
 
 interface Team {
@@ -273,14 +273,14 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
       {teams.length === 0 && (
         <div className="text-center py-6 bg-white rounded-xl border border-slate-200 p-4">
           <p className="text-slate-500 font-medium text-sm">No teams yet.</p>
-          <p className="text-slate-400 text-xs mt-1">Create your first team below, e.g. &quot;{group.id.slice(1)}.1&quot;.</p>
+          <p className="text-slate-400 text-xs mt-1">Create your first team below, e.g. &quot;{teamHint(group, 1)}&quot;.</p>
         </div>
       )}
 
       <form onSubmit={addTeam} className="flex gap-2 bg-emerald-50 border border-emerald-200 rounded-xl p-3">
         <input
           aria-label="New team name"
-          placeholder={`New team name, e.g. ${group.id.slice(1)}.${teams.length + 1}`}
+          placeholder={`New team name, e.g. ${teamHint(group, teams.length + 1)}`}
           maxLength={30}
           value={newTeam}
           onChange={(e) => setNewTeam(e.target.value)}

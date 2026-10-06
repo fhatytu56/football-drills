@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { ChevronRight } from 'lucide-react';
-import { AGE_GROUPS, DAY_LABEL } from '@/lib/groups';
+import { AGE_GROUPS, daysShort } from '@/lib/groups';
 
 export default function PickGroupPage() {
   return (
@@ -22,18 +22,18 @@ export default function PickGroupPage() {
         </h2>
 
         <nav className="grid grid-cols-2 gap-3">
-          {AGE_GROUPS.map((g) => (
+          {AGE_GROUPS.map((g, i) => (
             <Link
               key={g.id}
               href={`/${g.id}`}
-              className="group bg-white rounded-2xl p-4 shadow-md hover:shadow-lg hover:bg-emerald-50 transition flex flex-col"
+              className={`${AGE_GROUPS.length % 2 === 1 && i === 0 ? 'col-span-2 ' : ''}group bg-white rounded-2xl p-4 shadow-md hover:shadow-lg hover:bg-emerald-50 transition flex flex-col`}
             >
               <span className="flex items-center justify-between">
                 <span className="text-2xl font-black text-emerald-900 tracking-tight">{g.label}</span>
                 <ChevronRight className="w-5 h-5 text-emerald-700 group-hover:translate-x-0.5 transition" />
               </span>
               <span className="mt-1 text-xs font-semibold text-slate-500">
-                {DAY_LABEL[g.days[0]].short} &amp; {DAY_LABEL[g.days[1]].short}
+                {daysShort(g)}
               </span>
             </Link>
           ))}

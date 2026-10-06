@@ -36,10 +36,11 @@ Mobile-first web app to archive and collate youth football training drills.
 
 ## Age groups
 
-The home page lets people pick U8s, U9s, U10s or U11s. Each group has its own drills and its own two training days (set in `src/lib/groups.ts`):
+The home page lets people pick Academy, U8s, U9s, U10s or U11s. Each group has its own drills and its own two training days (set in `src/lib/groups.ts`):
 
 | Group | Training days |
 |---|---|
+| Academy | Sunday |
 | U8s | Wednesday, Friday |
 | U9s | Tuesday, Friday |
 | U10s | Tuesday, Thursday |

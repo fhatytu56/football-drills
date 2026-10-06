@@ -1,10 +1,13 @@
-export type TrainingDay = 'tuesday' | 'wednesday' | 'thursday' | 'friday';
-export type GroupId = 'u8' | 'u9' | 'u10' | 'u11';
+export type TrainingDay = 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'sunday';
+export type GroupId = 'academy' | 'u8' | 'u9' | 'u10' | 'u11';
 
 export interface AgeGroup {
   id: GroupId;
   label: string;
-  days: [TrainingDay, TrainingDay];
+  /** One or two training days a week. */
+  days: TrainingDay[];
+  /** Example team name for hints, e.g. "10.1". */
+  teamExample: string;
   /** Players on the pitch per team, keeper included. */
   aSide: 5 | 7;
   /** U10s/U11s: each player gets a main and a second position (GK, LB, RB, LM, CM, RM, ST). */
@@ -12,10 +15,11 @@ export interface AgeGroup {
 }
 
 export const AGE_GROUPS: AgeGroup[] = [
-  { id: 'u8', label: 'U8s', days: ['wednesday', 'friday'], aSide: 5, usesPositions: false },
-  { id: 'u9', label: 'U9s', days: ['tuesday', 'friday'], aSide: 5, usesPositions: false },
-  { id: 'u10', label: 'U10s', days: ['tuesday', 'thursday'], aSide: 7, usesPositions: true },
-  { id: 'u11', label: 'U11s', days: ['tuesday', 'thursday'], aSide: 7, usesPositions: true },
+  { id: 'academy', label: 'Academy', days: ['sunday'], teamExample: 'Academy 1', aSide: 5, usesPositions: false },
+  { id: 'u8', label: 'U8s', days: ['wednesday', 'friday'], teamExample: '8.1', aSide: 5, usesPositions: false },
+  { id: 'u9', label: 'U9s', days: ['tuesday', 'friday'], teamExample: '9.1', aSide: 5, usesPositions: false },
+  { id: 'u10', label: 'U10s', days: ['tuesday', 'thursday'], teamExample: '10.1', aSide: 7, usesPositions: true },
+  { id: 'u11', label: 'U11s', days: ['tuesday', 'thursday'], teamExample: '11.1', aSide: 7, usesPositions: true },
 ];
 
 export type Position = 'gk' | 'lb' | 'rb' | 'lm' | 'cm' | 'rm' | 'st';
@@ -56,7 +60,19 @@ export const DAY_LABEL: Record<TrainingDay, { long: string; short: string }> = {
   wednesday: { long: 'Wednesday', short: 'Wed' },
   thursday: { long: 'Thursday', short: 'Thu' },
   friday: { long: 'Friday', short: 'Fri' },
+  sunday: { long: 'Sunday', short: 'Sun' },
 };
+
+/** "Wed & Fri", or "Sunday" when there's only one day. */
+export function daysShort(group: AgeGroup) {
+  if (group.days.length === 1) return DAY_LABEL[group.days[0]].long;
+  return group.days.map((d) => DAY_LABEL[d].short).join(' & ');
+}
+
+/** Next team name hint: "10.1" -> "10.3" for the 3rd team; "Academy 1" -> "Academy 2". */
+export function teamHint(group: AgeGroup, n: number) {
+  return group.teamExample.replace(/\d+$/, String(n));
+}
 
 export function getGroup(id: string | null | undefined): AgeGroup | undefined {
   return AGE_GROUPS.find((g) => g.id === (id || '').toLowerCase());

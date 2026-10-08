@@ -64,6 +64,9 @@ export interface MatchDayState {
   plan?: PlannedSub[];
   /** How many subs have been made so far = which plan step is next. */
   subsMade?: number;
+  /** The line-up at kick-off, so Reset > Restart can put it back. */
+  startOnPitch?: Partial<Record<Spot, string | null>>;
+  startBench?: string[];
 }
 
 export interface PlannedSub {
@@ -225,6 +228,32 @@ export function kickOff(s: MatchDayState, now: number): MatchDayState {
     periodStartMs: s.phase === 'lineup' ? 0 : s.periodStartMs,
     lastSubMs: s.phase === 'lineup' ? 0 : s.lastSubMs,
     stints,
+    startOnPitch: s.phase === 'lineup' ? { ...s.onPitch } : s.startOnPitch,
+    startBench: s.phase === 'lineup' ? [...s.bench] : s.startBench,
+  };
+}
+
+/**
+ * Reset > Restart this match: back to the line-up screen with the kick-off line-up,
+ * sub gap and plan kept; clock, minutes and subs made go back to zero.
+ * (A match kicked off before this existed has no saved start line-up: keep who's on now.)
+ */
+export function restart(s: MatchDayState): MatchDayState {
+  return {
+    ...s,
+    onPitch: { ...(s.startOnPitch || s.onPitch) },
+    bench: [...(s.startBench || s.bench)],
+    phase: 'lineup',
+    period: 0,
+    periodStartMs: 0,
+    bankedMs: 0,
+    runningSince: null,
+    lastSubMs: 0,
+    snoozeUntilMs: 0,
+    stints: [],
+    subsMade: 0,
+    startOnPitch: undefined,
+    startBench: undefined,
   };
 }
 

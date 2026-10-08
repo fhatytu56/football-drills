@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Play, Pause, Minus, Plus, Timer, AlertTriangle, Smartphone, Flag, ChevronLeft, Check } from 'lucide-react';
+import { Play, Pause, Minus, Plus, Timer, AlertTriangle, Smartphone, Flag, ChevronLeft, Check, RotateCcw, X } from 'lucide-react';
 import { POSITIONS, type AgeGroup, type Position } from '@/lib/groups';
 import { hhmm, matchTitle, shortDate, todayInIreland } from '@/lib/matches';
 import { SPOTS } from '@/components/PositionPitch';
@@ -21,6 +21,7 @@ import {
   periodLabel,
   periodMs,
   periodOver,
+  restart,
   resume,
   snooze,
   startNextPeriod,
@@ -255,15 +256,16 @@ export default function MatchDayPanel({ group }: { group: AgeGroup }) {
         unlock();
         act(kickOff);
       }}
-      onFinish={() => {
-        if (state.phase === 'lineup') {
-          // Back to who's-here, keeping the match, players, sub gap, line-up and plan.
-          setDraft(state);
-          setState(null);
-          return;
-        }
-        if (state.phase === 'fulltime' || confirm('Leave this match? Its clock and minutes will be cleared.')) setState(null);
+      onBack={() => {
+        // Back to who's-here, keeping the match, players, sub gap, line-up and plan.
+        setDraft(state);
+        setState(null);
       }}
+      onRestart={() => {
+        setNow(Date.now());
+        setState((s) => (s ? restart(s) : s));
+      }}
+      onNewMatch={() => setState(null)}
       group={group}
     />
   );
@@ -583,7 +585,9 @@ function Game({
   wake,
   act,
   onKickOff,
-  onFinish,
+  onBack,
+  onRestart,
+  onNewMatch,
   group,
 }: {
   state: MatchDayState;
@@ -592,10 +596,19 @@ function Game({
   wake: WakeStatus;
   act: (fn: (s: MatchDayState, now: number) => MatchDayState) => void;
   onKickOff: () => void;
-  onFinish: () => void;
+  onBack: () => void;
+  onRestart: () => void;
+  onNewMatch: () => void;
   group: AgeGroup;
 }) {
   const [selected, setSelected] = useState<{ playerId?: string; spot?: Spot } | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  useEffect(() => {
+    if (!resetOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setResetOpen(false);
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [resetOpen]);
   const name = (id: string | null | undefined) => state.players.find((p) => p.id === id)?.first_name || '';
   const mins = (id: string) => Math.floor(minutesPlayedMs(state, id, now) / 60_000);
   const running = state.runningSince !== null;
@@ -665,17 +678,13 @@ function Game({
             </p>
             <p className="text-sm font-bold truncate">{state.title}</p>
           </div>
-          <button onClick={onFinish} className="text-[11px] font-bold text-slate-400 hover:text-white shrink-0">
-            {state.phase === 'fulltime' ? (
-              'Done'
-            ) : state.phase === 'lineup' ? (
+          {state.phase === 'lineup' && (
+            <button onClick={onBack} className="text-[11px] font-bold text-slate-400 hover:text-white shrink-0">
               <span className="flex items-center">
                 <ChevronLeft className="w-4 h-4" /> Back
               </span>
-            ) : (
-              'Leave'
-            )}
-          </button>
+            </button>
+          )}
         </div>
         <div className="flex items-end justify-between gap-3 mt-2">
           <p className="font-mono font-black text-5xl tabular-nums" aria-label="Clock">
@@ -739,6 +748,23 @@ function Game({
             </button>
           )}
         </div>
+        {/* The way out once the game has started: full width so it's easy to find on a phone. */}
+        {(state.phase === 'playing' || state.phase === 'break') && (
+          <button
+            onClick={() => setResetOpen(true)}
+            className="w-full mt-2 h-11 rounded-lg border border-slate-600 text-slate-200 hover:bg-slate-800 text-sm font-bold flex items-center justify-center gap-2"
+          >
+            <RotateCcw className="w-4 h-4" /> Reset
+          </button>
+        )}
+        {state.phase === 'fulltime' && (
+          <button
+            onClick={onNewMatch}
+            className="w-full mt-3 h-11 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-900 text-sm font-black flex items-center justify-center gap-2"
+          >
+            <Play className="w-4 h-4 fill-current" /> New match
+          </button>
+        )}
       </div>
 
       {/* sub alert */}
@@ -892,9 +918,56 @@ function Game({
               ))}
           </ul>
           <p className="px-4 py-2 text-[11px] text-slate-400 border-t border-slate-100">
-            Not saved anywhere — tap Done to clear it from this phone.
+            Not saved anywhere — tap New match to clear it from this phone.
           </p>
         </section>
+      )}
+
+      {resetOpen && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/60 p-3" onClick={() => setResetOpen(false)}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-title"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-4 space-y-2"
+          >
+            <div className="flex items-center justify-between">
+              <h2 id="reset-title" className="text-base font-black text-slate-900">
+                Reset
+              </h2>
+              <button aria-label="Close" onClick={() => setResetOpen(false)} className="w-9 h-9 -mr-2 flex items-center justify-center text-slate-400">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <button
+              onClick={() => {
+                setResetOpen(false);
+                setSelected(null);
+                onRestart();
+              }}
+              className="w-full text-left rounded-xl border-2 border-slate-200 hover:border-emerald-600 p-3"
+            >
+              <span className="block text-sm font-black text-slate-900">Restart this match</span>
+              <span className="block text-xs text-slate-500 mt-0.5">
+                Keep the starting line-up and sub plan. Clock and minutes go back to 0.
+              </span>
+            </button>
+            <button
+              onClick={() => {
+                setResetOpen(false);
+                onNewMatch();
+              }}
+              className="w-full text-left rounded-xl border-2 border-slate-200 hover:border-red-500 p-3"
+            >
+              <span className="block text-sm font-black text-red-700">New match</span>
+              <span className="block text-xs text-slate-500 mt-0.5">Clear everything and pick a match again.</span>
+            </button>
+            <button onClick={() => setResetOpen(false)} className="w-full h-11 rounded-xl bg-slate-100 text-slate-700 text-sm font-bold">
+              Cancel
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

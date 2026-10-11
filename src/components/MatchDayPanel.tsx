@@ -27,12 +27,17 @@ import {
   startNextPeriod,
   subDue,
   swap,
-  suggestPlan,
-  plannedMinutes,
-  planTimes,
+  buildPlan,
+  clampSchedule,
+  defaultSchedule,
+  planInputOf,
+  scheduleLimits,
+  scheduleOf,
+  withPlan,
   nextPlanned,
   type MatchDayState,
   type PlannedSub,
+  type Schedule,
   type Spot,
 } from '@/lib/matchday';
 
@@ -63,6 +68,9 @@ interface SavedPlan {
   bench: string[];
   sub_gap: number;
   subs: PlannedSub[];
+  /** Missing on plans saved before sub windows and targets. */
+  schedule?: Schedule | null;
+  targets?: Record<string, number> | null;
   updated_at: string;
 }
 
@@ -217,6 +225,7 @@ export default function MatchDayPanel({ group }: { group: AgeGroup }) {
       lastAlert.current = 0;
       return;
     }
+    if (state.phase === 'break') return; // half-time subs: the whistle just beeped, the banner shows
     const t = matchMs(state, now);
     if (lastAlert.current === 0 || t - lastAlert.current >= 30_000) {
       lastAlert.current = t || 1;
@@ -263,7 +272,8 @@ export default function MatchDayPanel({ group }: { group: AgeGroup }) {
       }}
       onRestart={() => {
         setNow(Date.now());
-        setState((s) => (s ? restart(s) : s));
+        // Re-plan from the kick-off line-up, schedule and targets (same plan as before kick-off).
+        setState((s) => (s ? withPlan(restart(s)) : s));
       }}
       onNewMatch={() => setState(null)}
       group={group}
@@ -295,7 +305,6 @@ function Setup({
     draft?.teamId ? { matchId: draft.matchId, teamId: draft.teamId } : null
   );
   const [here, setHere] = useState<string[]>(draft ? draft.players.map((p) => p.id) : []);
-  const [gap, setGap] = useState(draft?.subGapMins ?? 5);
   const [savedPlan, setSavedPlan] = useState<SavedPlan | null>(null);
 
   useEffect(() => {
@@ -336,7 +345,6 @@ function Setup({
         const ids = new Set(squad.map((p) => p.id));
         setSavedPlan(data.plan);
         setHere((data.plan.here as string[]).filter((id) => ids.has(id)));
-        setGap(data.plan.sub_gap);
       }
     } catch {
       /* no saved plan: carry on */
@@ -359,7 +367,7 @@ function Setup({
         </h2>
         <p className="text-xs text-slate-300 mt-1">
           {group.aSide}-a-side · {format.halfMins}-min halves
-          {group.aSide === 5 ? ' · two games on the day' : ''}. Pick the match, tick who&apos;s here, set how often to sub.
+          {group.aSide === 5 ? ' · two games on the day' : ''}. Pick the match and tick who&apos;s here. Subs and game time are set on the next step.
         </p>
       </div>
 
@@ -461,41 +469,10 @@ function Setup({
             </ul>
           </section>
 
-          <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-4">
-            <label htmlFor="sub-gap" className="block text-xs font-bold uppercase text-slate-500 mb-2">
-              Sub every
-            </label>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                aria-label="One minute less"
-                onClick={() => setGap(Math.max(1, gap - 1))}
-                className="w-11 h-11 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
-              >
-                <Minus className="w-4 h-4" />
-              </button>
-              <input
-                id="sub-gap"
-                type="number"
-                inputMode="numeric"
-                min={1}
-                max={format.halfMins}
-                value={gap}
-                onChange={(e) => setGap(Math.min(format.halfMins, Math.max(1, parseInt(e.target.value) || 1)))}
-                className="w-16 h-11 text-center text-lg font-black text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
-              />
-              <button
-                type="button"
-                aria-label="One minute more"
-                onClick={() => setGap(Math.min(format.halfMins, gap + 1))}
-                className="w-11 h-11 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
-              >
-                <Plus className="w-4 h-4" />
-              </button>
-              <span className="text-sm font-semibold text-slate-600">minutes</span>
-            </div>
+          {(savedPlan || (benchCount === 0 && here.length > 0)) && (
+          <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-2">
             {savedPlan && (
-              <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2 mt-3" role="status">
+              <p className="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2" role="status">
                 A coach saved a sub plan for this match ({new Date(savedPlan.updated_at).toLocaleString('en-IE', {
                   weekday: 'short',
                   hour: '2-digit',
@@ -504,16 +481,21 @@ function Setup({
               </p>
             )}
             {benchCount === 0 && here.length > 0 && (
-              <p className="text-xs text-amber-700 mt-2">Nobody on the bench, so there won&apos;t be any sub alerts.</p>
+              <p className="text-xs text-amber-700">Nobody on the bench, so there won&apos;t be any sub alerts.</p>
             )}
           </section>
+          )}
 
           <button
             disabled={here.length === 0}
             onClick={() => {
               const chosen = players.filter((p) => here.includes(p.id));
               let { onPitch, bench } = autoLineup(format.spots, chosen, group.usesPositions);
-              let plan: PlannedSub[];
+              const hereSet = new Set(chosen.map((p) => p.id));
+              const keepHere = (t: Record<string, number> | null | undefined) =>
+                Object.fromEntries(Object.entries(t || {}).filter(([id, v]) => hereSet.has(id) && typeof v === 'number'));
+              let schedule: Schedule = defaultSchedule(format);
+              let targets: Record<string, number> = {};
               const sameAsDraft =
                 !!draft &&
                 draft.teamId === choice.teamId &&
@@ -521,16 +503,13 @@ function Setup({
                 draft.players.length === chosen.length &&
                 chosen.every((p) => draft.players.some((d) => d.id === p.id));
               if (draft && sameAsDraft) {
-                // Came back with Back and changed nothing about who's here: keep line-up and plan.
+                // Came back with Back and changed nothing about who's here: keep line-up, schedule, targets.
                 onPitch = draft.onPitch;
                 bench = draft.bench;
-                plan =
-                  draft.subGapMins === gap
-                    ? draft.plan || []
-                    : suggestPlan(format, gap, onPitch, bench, chosen, group.usesPositions);
+                schedule = scheduleOf(draft);
+                targets = keepHere(draft.targets);
               } else if (savedPlan) {
                 // Use the saved line-up for whoever's here; anyone new goes to the bench.
-                const hereSet = new Set(chosen.map((p) => p.id));
                 const saved: Partial<Record<Spot, string | null>> = {};
                 for (const sp of format.spots) {
                   const id = (savedPlan.lineup as Record<string, string | null>)[sp];
@@ -538,19 +517,29 @@ function Setup({
                 }
                 const placed = new Set(Object.values(saved).filter(Boolean) as string[]);
                 onPitch = saved;
-                bench = chosen.map((p) => p.id).filter((id) => !placed.has(id));
-                plan = savedPlan.subs.filter((x) => hereSet.has(x.on) && hereSet.has(x.off));
-              } else {
-                plan = suggestPlan(format, gap, onPitch, bench, chosen, group.usesPositions);
+                // Keep the saved bench order (it decides ties in the plan), newcomers last.
+                const savedBench = (savedPlan.bench || []).filter((id) => hereSet.has(id) && !placed.has(id));
+                bench = [
+                  ...savedBench,
+                  ...chosen.map((p) => p.id).filter((id) => !placed.has(id) && !savedBench.includes(id)),
+                ];
+                schedule = savedPlan.schedule || { firstAt: savedPlan.sub_gap, firstCount: 1, every: savedPlan.sub_gap, per: 1 };
+                targets = keepHere(savedPlan.targets);
+              } else if (draft) {
+                // Came back and changed who's here: new line-up, same schedule and targets.
+                schedule = scheduleOf(draft);
+                targets = keepHere(draft.targets);
               }
-              onReady({
+              const spotsInPlay = format.spots.filter((sp) => onPitch[sp] && !(sp === 'gk' && !format.keeperRotates)).length;
+              schedule = clampSchedule(format, schedule, bench.length, spotsInPlay);
+              onReady(withPlan({
                 version: 1,
                 groupId: group.id,
                 matchId: match?.id || null,
                 teamId: choice.teamId,
                 title: match ? matchTitle({ ...match, team: teamName(match.team_id) }) : `${teamName(choice.teamId)} · quick game`,
                 format,
-                subGapMins: gap,
+                subGapMins: schedule.every,
                 players: chosen.map((p) => ({ id: p.id, first_name: p.first_name, positions: p.positions })),
                 onPitch,
                 bench,
@@ -562,9 +551,11 @@ function Setup({
                 lastSubMs: 0,
                 snoozeUntilMs: 0,
                 stints: [],
-                plan,
+                plan: [],
                 subsMade: 0,
-              });
+                schedule,
+                targets,
+              }));
             }}
             className="w-full bg-emerald-800 hover:bg-emerald-900 disabled:opacity-40 text-white text-sm font-bold py-3 rounded-xl"
           >
@@ -626,7 +617,11 @@ function Game({
     }
     const same =
       (selected.playerId && selected.playerId === item.playerId) || (!selected.playerId && selected.spot === item.spot);
-    if (!same) act((s, t) => swap(s, selected, item, t));
+    if (!same)
+      act((s, t) => {
+        const n = swap(s, selected, item, t);
+        return n.phase === 'lineup' && n !== s ? withPlan(n) : n;
+      });
     setSelected(null);
   };
   const isSel = (item: { playerId?: string; spot?: Spot }) =>
@@ -634,7 +629,7 @@ function Game({
     ((selected.playerId && selected.playerId === item.playerId) || (!selected.playerId && !item.playerId && selected.spot === item.spot));
 
   const benchSorted = [...state.bench].sort((a, b) => mins(a) - mins(b));
-  const planned = state.phase === 'playing' ? nextPlanned(state) : null;
+  const planned = state.phase === 'playing' || state.phase === 'break' ? nextPlanned(state) : null;
   const spotOf = (id: string) => state.format.spots.find((sp) => state.onPitch[sp] === id);
   const periodLeft = state.format.halfMins * 60_000 - periodMs(state, now);
 
@@ -771,7 +766,8 @@ function Game({
       {due && (
         <div role="alert" className="bg-amber-400 text-slate-900 rounded-xl p-4 shadow-lg border-2 border-amber-600 animate-pulse">
           <p className="font-black text-lg flex items-center gap-2">
-            <AlertTriangle className="w-5 h-5" /> Sub due{planned ? ` · sub ${planned.number}` : ''}
+            <AlertTriangle className="w-5 h-5" /> {state.phase !== 'break' ? 'Sub due' : state.period % 2 === 0 ? 'Half-time sub' : 'Sub between games'}
+            {planned ? ` · sub ${planned.number}` : ''}
           </p>
           {planned && planned.ok ? (
             <>
@@ -983,6 +979,68 @@ function spotXY(spot: Spot, count: number) {
 
 // ---------- sub plan: edit before kick-off, follow during the game ----------
 
+/** A number box you can type into, with − / + either side. Typing commits as you go; blur tidies it. */
+function NumberField({
+  id,
+  value,
+  min,
+  max,
+  onChange,
+  downLabel,
+  upLabel,
+  onDown,
+  onUp,
+  suffix,
+  muted,
+  compact,
+}: {
+  id: string;
+  value: number;
+  min: number;
+  max: number;
+  onChange: (v: number) => void;
+  downLabel: string;
+  upLabel: string;
+  onDown?: () => void;
+  onUp?: () => void;
+  suffix?: string;
+  muted?: boolean;
+  compact?: boolean;
+}) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const set = (v: number) => onChange(Math.min(max, Math.max(min, Math.round(v))));
+  const btn = 'w-11 h-11 shrink-0 flex items-center justify-center text-slate-800 disabled:opacity-30';
+  return (
+    <div className={`flex items-center h-11 rounded-xl overflow-hidden bg-white ${compact ? '' : 'border border-slate-300'}`}>
+      <button type="button" aria-label={downLabel} disabled={!onDown && value <= min} onClick={onDown || (() => set(value - 1))} className={`${btn} ${compact ? 'bg-emerald-100' : 'bg-slate-100'}`}>
+        <Minus className="w-4 h-4" />
+      </button>
+      <input
+        id={id}
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          const n = parseInt(e.target.value, 10);
+          if (!Number.isNaN(n)) set(n);
+        }}
+        onBlur={() => setText(String(value))}
+        className={`${compact ? 'w-10' : 'flex-1 w-full'} min-w-0 h-full text-center text-lg font-black bg-transparent focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none ${
+          muted ? 'text-slate-400' : 'text-slate-900'
+        }`}
+      />
+      {suffix && <span className={`pr-1 text-sm font-bold ${muted ? 'text-slate-400' : 'text-slate-600'}`}>{suffix}</span>}
+      <button type="button" aria-label={upLabel} disabled={!onUp && value >= max} onClick={onUp || (() => set(value + 1))} className={`${btn} ${compact ? 'bg-emerald-100' : 'bg-slate-100'}`}>
+        <Plus className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
 function PlanEditor({
   state,
   act,
@@ -992,40 +1050,40 @@ function PlanEditor({
   act: (fn: (s: MatchDayState, now: number) => MatchDayState) => void;
   name: (id: string | null | undefined) => string;
 }) {
-  const plan = state.plan || [];
-  const times = planTimes(state.format, state.subGapMins, plan.length);
-  const minutes = plannedMinutes(state.format, state.subGapMins, state.onPitch, plan);
+  const schedule = scheduleOf(state);
+  const targets = state.targets || {};
+  const r = buildPlan(planInputOf(state));
+  const total = r.total;
+  const spotsInPlay = r.starters.length;
+  const benchSize = r.rotating.length - spotsInPlay;
+  const lim = scheduleLimits(state.format, benchSize, spotsInPlay);
+  const step = Math.max(1, Math.round((schedule.every / total) * 100));
+  const pct = (mins: number) => Math.round((mins / total) * 100);
+  const hasTarget = (id: string) => typeof targets[id] === 'number';
+  const [sel, setSel] = useState<string | null>(null);
+  const selId = sel && r.rotating.includes(sel) ? sel : null;
+
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveMsg, setSaveMsg] = useState('');
-  const sig = JSON.stringify([state.onPitch, state.bench, plan, state.subGapMins]);
+  const sig = JSON.stringify([state.onPitch, state.bench, r.subs, schedule, targets]);
   const [savedSig, setSavedSig] = useState<string | null>(null);
   const dirty = savedSig !== sig;
-  const byName = [...state.players].sort((a, b) => a.first_name.localeCompare(b.first_name));
-  const usePositions = state.format.spots.length === 7;
 
-  const setPlan = (next: PlannedSub[]) => {
-    setRegapped(false);
-    act((s) => ({ ...s, plan: next }));
-  };
-  const [regapped, setRegapped] = useState(false);
-  // New gap: the number and timing of subs change, so the plan is suggested again for it.
-  const setGap = (g: number) => {
-    const gap = Math.min(state.format.halfMins, Math.max(1, g));
-    if (gap === state.subGapMins) return;
-    setRegapped(true);
-    act((s) => ({
-      ...s,
-      subGapMins: gap,
-      plan: suggestPlan(s.format, gap, s.onPitch, s.bench, s.players, usePositions),
-    }));
-  };
-  const setRow = (i: number, key: 'on' | 'off', id: string) => setPlan(plan.map((x, j) => (j === i ? { ...x, [key]: id } : x)));
+  const setSchedule = (patch: Partial<Schedule>) =>
+    act((s) => withPlan({ ...s, schedule: clampSchedule(s.format, { ...scheduleOf(s), ...patch }, benchSize, spotsInPlay) }));
+  const setTarget = (id: string, v: number | null) =>
+    act((s) => {
+      const t = { ...(s.targets || {}) };
+      if (v === null) delete t[id];
+      else t[id] = Math.min(100, Math.max(0, Math.round(v)));
+      return withPlan({ ...s, targets: t });
+    });
 
   const save = async () => {
     if (!state.matchId) return;
     setSaveState('saving');
     try {
-      const r = await fetch('/api/plans', {
+      const res = await fetch('/api/plans', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1033,12 +1091,14 @@ function PlanEditor({
           here: state.players.map((p) => p.id),
           lineup: state.onPitch,
           bench: state.bench,
-          sub_gap: state.subGapMins,
-          subs: plan,
+          sub_gap: schedule.every,
+          schedule,
+          targets,
+          subs: r.subs,
         }),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
       setSavedSig(sig);
       setSaveState('saved');
       setSaveMsg('');
@@ -1048,145 +1108,258 @@ function PlanEditor({
     }
   };
 
+  // the line under the steppers: is the plan fair / do the targets work?
+  const setIds = r.rotating.filter(hasTarget);
+  const autoIds = r.rotating.filter((id) => !hasTarget(id));
+  const range = (ids: string[]) => {
+    const v = ids.map((id) => pct(r.minutes[id] || 0));
+    const lo = Math.min(...v);
+    const hi = Math.max(...v);
+    return lo === hi ? `${lo}%` : `${lo}–${hi}%`;
+  };
+  const chip: { ok: boolean; text: string } = r.problem
+    ? { ok: false, text: r.problem }
+    : r.misses.length
+    ? { ok: false, text: `${name(r.misses[0])} gets ${pct(r.minutes[r.misses[0]] || 0)}%, target ${targets[r.misses[0]]}%` }
+    : !setIds.length
+    ? { ok: true, text: `Everyone ${range(autoIds)}` }
+    : autoIds.length
+    ? { ok: true, text: `Targets hit · everyone else ${range(autoIds)}` }
+    : { ok: true, text: 'Targets hit' };
+
+  // timeline: a line at each sub window, a darker one at half-time
+  const at = (t: number) => `${(t / total) * 100}%`;
+  const subTimes = r.windows.map((w) => w.t);
+  const breaks = Array.from({ length: state.format.periods - 1 }, (_, i) => (i + 1) * state.format.halfMins);
+  const labels: number[] = [];
+  for (const t of subTimes) if (!labels.length || t - labels[labels.length - 1] >= total * 0.09) labels.push(t);
+  const track = (id: string, dark?: boolean) => (
+    <span className={`relative flex-1 h-5 rounded-md overflow-hidden ${dark ? 'bg-slate-700' : 'bg-slate-100'}`} aria-hidden>
+      {!dark && subTimes.map((t) => <span key={t} className="absolute inset-y-0 w-px bg-slate-300" style={{ left: at(t) }} />)}
+      {!dark && breaks.map((t) => <span key={`b${t}`} className="absolute inset-y-0 w-0.5 bg-slate-400" style={{ left: at(t) }} />)}
+      {!dark &&
+        (r.stints[id] || []).map(([a, b]) => (
+          <span key={a} className="absolute inset-y-0 bg-emerald-600 rounded" style={{ left: at(a), width: at(b - a) }} />
+        ))}
+    </span>
+  );
+  const row = (id: string) => {
+    const s = selId === id;
+    const set = hasTarget(id);
+    const miss = r.misses.includes(id);
+    return (
+      <li key={id}>
+        <button
+          type="button"
+          onClick={() => setSel(s ? null : id)}
+          aria-pressed={s}
+          className={`w-full h-12 px-4 flex items-center gap-2 text-left ${s ? 'bg-emerald-50' : 'hover:bg-slate-50'}`}
+        >
+          <span className="w-20 shrink-0 min-w-0 flex flex-col">
+            <span className={`text-sm font-semibold truncate ${s ? 'text-emerald-900' : 'text-slate-900'}`}>{name(id)}</span>
+            <span className={`text-[11px] font-bold ${set ? 'text-emerald-700' : 'text-slate-500'}`}>
+              {set ? `Target ${targets[id]}%` : 'Auto'}
+            </span>
+          </span>
+          {track(id)}
+          <span className="w-11 shrink-0 flex flex-col items-end">
+            <span className={`text-sm font-bold tabular-nums ${miss ? 'text-amber-700' : 'text-slate-900'}`}>{pct(r.minutes[id] || 0)}%</span>
+            <span className="text-[11px] font-semibold text-slate-500 tabular-nums">{r.minutes[id] || 0}′</span>
+          </span>
+        </button>
+      </li>
+    );
+  };
+
+  const selAuto = !!selId && !hasTarget(selId);
+  const selValue = selId ? (selAuto ? Math.round(r.autoPct) : targets[selId]) : 0;
+  const autoDown = () => {
+    const f = Math.floor(r.autoPct / step) * step;
+    return f >= r.autoPct - 1e-6 ? f - step : f;
+  };
+  const autoUp = () => {
+    const c = Math.ceil(r.autoPct / step) * step;
+    return c <= r.autoPct + 1e-6 ? c + step : c;
+  };
+  const sectionLabel = 'px-4 pt-3 pb-1 text-[11px] font-bold uppercase tracking-wide text-slate-500';
+
   return (
-    <section className="bg-white rounded-xl border border-slate-200 shadow-sm" aria-label="Sub plan">
-      <div className="px-4 pt-3 pb-3 border-b border-slate-100 flex items-center gap-2">
-        <label htmlFor="plan-gap" className="text-xs font-bold uppercase text-slate-500 mr-auto">
-          Sub every
-        </label>
-        <button
-          type="button"
-          aria-label="Sub gap one minute less"
-          onClick={() => setGap(state.subGapMins - 1)}
-          className="w-10 h-10 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
-        >
-          <Minus className="w-4 h-4" />
-        </button>
-        <input
-          id="plan-gap"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={state.format.halfMins}
-          value={state.subGapMins}
-          onChange={(e) => setGap(parseInt(e.target.value) || 1)}
-          className="w-14 h-10 text-center text-lg font-black text-slate-900 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
-        />
-        <button
-          type="button"
-          aria-label="Sub gap one minute more"
-          onClick={() => setGap(state.subGapMins + 1)}
-          className="w-10 h-10 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center"
-        >
-          <Plus className="w-4 h-4" />
-        </button>
-        <span className="text-sm font-semibold text-slate-600">min</span>
-      </div>
-      <header className="px-4 pt-3 pb-2 border-b border-slate-100 flex items-center justify-between gap-2">
+    <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden" aria-label="Sub plan">
+      <header className="px-4 pt-3 pb-3 flex items-start justify-between gap-2">
         <div>
-          <h3 className="font-bold text-slate-900 text-sm">Sub plan</h3>
+          <h3 className="font-bold text-slate-900">Sub plan</h3>
           <p className="text-xs text-slate-500">
-            {plan.length} {plan.length === 1 ? 'sub' : 'subs'}. Change any pair.
+            {total}′ · {r.subs.length} {r.subs.length === 1 ? 'sub' : 'subs'} in {r.windows.length} {r.windows.length === 1 ? 'window' : 'windows'}
           </p>
-          {regapped && <p className="text-[11px] text-emerald-700 font-semibold">Re-planned for every {state.subGapMins} min.</p>}
         </div>
-        <button
-          onClick={() =>
-            setPlan(suggestPlan(state.format, state.subGapMins, state.onPitch, state.bench, state.players, usePositions))
-          }
-          className="text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 rounded-lg shrink-0"
-        >
-          Suggest again
-        </button>
-      </header>
-
-      {plan.length === 0 ? (
-        <p className="px-4 py-3 text-xs text-slate-400">No subs planned{state.bench.length ? '' : ' — nobody on the bench'}.</p>
-      ) : (
-        <ol className="divide-y divide-slate-100">
-          {plan.map((x, i) => (
-            <li key={i} className="px-3 py-2 flex items-center gap-2 text-sm">
-              <span className="w-12 shrink-0 text-[11px] font-bold text-slate-500 leading-tight">
-                Sub {i + 1}
-                <br />~{times[i]}′
-              </span>
-              <select
-                aria-label={`Sub ${i + 1} on`}
-                value={x.on}
-                onChange={(e) => setRow(i, 'on', e.target.value)}
-                className="flex-1 min-w-0 px-2 py-1.5 border border-emerald-300 bg-emerald-50 rounded-lg text-sm font-semibold text-emerald-900"
-              >
-                {byName.map((p) => (
-                  <option key={p.id} value={p.id} disabled={p.id === x.off}>{p.first_name}</option>
-                ))}
-              </select>
-              <span className="text-[11px] font-bold text-slate-400 shrink-0">on for</span>
-              <select
-                aria-label={`Sub ${i + 1} off`}
-                value={x.off}
-                onChange={(e) => setRow(i, 'off', e.target.value)}
-                className="flex-1 min-w-0 px-2 py-1.5 border border-slate-300 rounded-lg text-sm font-semibold text-slate-800"
-              >
-                {byName.map((p) => (
-                  <option key={p.id} value={p.id} disabled={p.id === x.on}>{p.first_name}</option>
-                ))}
-              </select>
-              <button
-                aria-label={`Remove sub ${i + 1}`}
-                onClick={() => setPlan(plan.filter((_, j) => j !== i))}
-                className="text-slate-300 hover:text-red-600 px-1 text-lg leading-none"
-              >
-                ×
-              </button>
-            </li>
-          ))}
-        </ol>
-      )}
-
-      {plan.length > 0 && (
-        <div className="px-4 py-3 border-t border-slate-100">
-          <p className="text-[11px] font-bold uppercase text-slate-500 mb-1.5">Minutes if the plan runs on time</p>
-          <div className="flex flex-wrap gap-1.5" aria-label="Planned minutes">
-            {[...state.players]
-              .sort((a, b) => (minutes[a.id] || 0) - (minutes[b.id] || 0))
-              .map((p) => (
-                <span key={p.id} className="text-xs font-semibold bg-slate-100 text-slate-700 rounded-md px-2 py-1">
-                  {p.first_name} {Math.round(minutes[p.id] || 0)}′
-                </span>
-              ))}
-          </div>
-        </div>
-      )}
-
-      <div className="px-4 pb-4 pt-1 flex items-center gap-3">
-        {state.bench.length > 0 && (
+        {benchSize > 0 && (
           <button
+            type="button"
             onClick={() => {
-              const last = plan[plan.length - 1];
-              const on = state.bench[0];
-              const off = state.format.spots.map((sp) => state.onPitch[sp]).find((id) => id && id !== on) || '';
-              if (on && off) setPlan([...plan, last ? { on: last.off, off: last.on } : { on, off }]);
+              setSel(null);
+              act((s) => withPlan({ ...s, targets: {} }));
             }}
-            className="text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 px-3 py-2 rounded-lg"
+            disabled={!setIds.length}
+            className="h-11 px-3 rounded-xl text-sm font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 shrink-0"
           >
-            + Add sub
+            All auto
           </button>
         )}
-        <div className="flex-1" />
+      </header>
+
+      {benchSize === 0 ? (
+        <p className="px-4 pb-3 text-xs text-slate-500">Nobody on the bench, so no subs.</p>
+      ) : (
+        <>
+          <div className="px-4 pb-4 border-b border-slate-100 grid grid-cols-2 gap-x-3 gap-y-3">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="plan-first-at" className="text-xs font-semibold text-slate-600">First subs at</label>
+              <NumberField id="plan-first-at" value={schedule.firstAt} {...lim.firstAt} suffix="′" downLabel="First subs earlier" upLabel="First subs later" onChange={(v) => setSchedule({ firstAt: v })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="plan-first-count" className="text-xs font-semibold text-slate-600">How many</label>
+              <NumberField id="plan-first-count" value={Math.min(schedule.firstCount, lim.firstCount.max)} {...lim.firstCount} downLabel="Fewer first subs" upLabel="More first subs" onChange={(v) => setSchedule({ firstCount: v })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="plan-every" className="text-xs font-semibold text-slate-600">Then every</label>
+              <NumberField id="plan-every" value={schedule.every} {...lim.every} suffix="′" downLabel="Subs more often" upLabel="Subs less often" onChange={(v) => setSchedule({ every: v })} />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="plan-per" className="text-xs font-semibold text-slate-600">How many</label>
+              <NumberField id="plan-per" value={Math.min(schedule.per, lim.per.max)} {...lim.per} downLabel="Fewer subs each time" upLabel="More subs each time" onChange={(v) => setSchedule({ per: v })} />
+            </div>
+            <p
+              role="status"
+              aria-label="Plan check"
+              className={`col-span-2 flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-bold ${
+                chip.ok ? 'bg-emerald-50 text-emerald-900' : 'bg-amber-50 text-amber-900'
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full shrink-0 ${chip.ok ? 'bg-emerald-600' : 'bg-amber-500'}`} aria-hidden />
+              {chip.text}
+            </p>
+          </div>
+
+          <div className="px-4 pt-3 pb-1">
+            {selId ? (
+              <div className="flex items-center gap-1.5 min-h-14 p-1.5 pl-3 rounded-xl bg-emerald-800 text-white" aria-label="Game time">
+                <label htmlFor="plan-target" className="flex-1 min-w-0 truncate text-sm font-bold">
+                  {name(selId)}
+                </label>
+                <NumberField
+                  id="plan-target"
+                  compact
+                  value={selValue}
+                  min={0}
+                  max={100}
+                  suffix="%"
+                  muted={selAuto}
+                  downLabel="Less game time"
+                  upLabel="More game time"
+                  onDown={selAuto ? () => setTarget(selId, autoDown()) : selValue <= 0 ? undefined : () => setTarget(selId, selValue - step)}
+                  onUp={selAuto ? () => setTarget(selId, autoUp()) : selValue >= 100 ? undefined : () => setTarget(selId, selValue + step)}
+                  onChange={(v) => setTarget(selId, v)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setTarget(selId, null)}
+                  disabled={selAuto}
+                  className="h-11 px-2.5 rounded-lg bg-emerald-700 text-sm font-bold disabled:opacity-40 shrink-0"
+                >
+                  Auto
+                </button>
+                <button
+                  type="button"
+                  aria-label="Close"
+                  onClick={() => setSel(null)}
+                  className="w-11 h-11 rounded-lg bg-white text-emerald-800 flex items-center justify-center shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <p className="min-h-14 flex items-center px-3 rounded-xl bg-slate-100 text-sm text-slate-700">
+                Tap a player to set their game time. Auto players share what&apos;s left evenly.
+              </p>
+            )}
+          </div>
+
+          <div className="flex items-end gap-2 px-4 pt-2 h-6" aria-hidden>
+            <span className="w-20 shrink-0" />
+            <span className="relative flex-1 h-4">
+              {labels.map((t) => (
+                <span key={t} className="absolute bottom-0 -translate-x-1/2 text-[10px] font-bold text-slate-500 tabular-nums" style={{ left: at(t) }}>
+                  {t}
+                </span>
+              ))}
+            </span>
+            <span className="w-11 shrink-0 text-right text-[10px] font-bold text-slate-500">Plan</span>
+          </div>
+
+          <ul aria-label="Planned game time">
+            {r.keeper && (
+              <li className="h-12 px-4 flex items-center gap-2">
+                <span className="w-20 shrink-0 min-w-0 flex flex-col">
+                  <span className="text-sm font-semibold text-slate-900 truncate">{name(r.keeper)}</span>
+                  <span className="text-[11px] font-bold text-slate-500">Keeper</span>
+                </span>
+                {track(r.keeper, true)}
+                <span className="w-11 shrink-0 flex flex-col items-end">
+                  <span className="text-sm font-bold">100%</span>
+                  <span className="text-[11px] font-semibold text-slate-500">{total}′</span>
+                </span>
+              </li>
+            )}
+            <li className={sectionLabel}>Starting</li>
+            {r.starters.map(row)}
+            <li className={sectionLabel}>Bench</li>
+            {r.rotating.slice(spotsInPlay).map(row)}
+          </ul>
+
+          <div className="mt-3 border-t border-slate-200">
+            <div className="px-4 pt-3 pb-1 flex items-baseline justify-between">
+              <h4 className="text-sm font-bold text-slate-900">Subs</h4>
+              <span className="text-[11px] text-slate-500">For the Match Day alerts</span>
+            </div>
+            {r.windows.length === 0 ? (
+              <p className="px-4 pb-3 text-xs text-slate-500">No subs needed for these targets.</p>
+            ) : (
+              <ol aria-label="Planned subs">
+                {r.windows.map((w) => (
+                  <li key={w.t} className="px-4 py-2 border-t border-slate-100 flex gap-3">
+                    <span className="w-10 shrink-0 text-sm font-extrabold text-emerald-800 tabular-nums">{w.t}′</span>
+                    <span className="flex-1 flex flex-col gap-1">
+                      {w.subs.map((x) => (
+                        <span key={x.on} className="text-sm">
+                          <b className="text-emerald-800">{name(x.on)}</b> <span className="text-xs font-semibold text-slate-500">on for</span>{' '}
+                          <span className="font-semibold text-slate-700">{name(x.off)}</span>
+                        </span>
+                      ))}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </>
+      )}
+
+      <div className="px-4 py-3 border-t border-slate-100 flex items-center gap-3">
         {state.matchId ? (
           <button
+            type="button"
             onClick={save}
             disabled={saveState === 'saving' || (!dirty && saveState === 'saved')}
-            className="text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 px-4 py-2 rounded-lg"
+            className="w-full h-11 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 rounded-xl"
           >
             {saveState === 'saving' ? 'Saving…' : !dirty && saveState === 'saved' ? 'Saved ✓' : 'Save plan'}
           </button>
         ) : (
-          <span className="text-[11px] text-slate-400">Quick game: plan stays on this phone.</span>
+          <span className="w-full text-center text-xs text-slate-500">Quick game: plan stays on this phone.</span>
         )}
       </div>
       {state.matchId && (
-        <p className={`px-4 pb-3 -mt-2 text-[11px] ${saveState === 'error' ? 'text-red-600 font-semibold' : 'text-slate-400'}`} role="status">
+        <p className={`px-4 pb-3 -mt-1 text-[11px] text-center ${saveState === 'error' ? 'text-red-600 font-semibold' : 'text-slate-500'}`} role="status">
           {saveState === 'error'
             ? saveMsg
             : !dirty && saveState === 'saved'
@@ -1221,7 +1394,7 @@ function PlanList({ state, name }: { state: MatchDayState; name: (id: string | n
                 i < done ? 'text-slate-400 line-through' : i === done ? 'font-bold text-slate-900 bg-amber-50' : 'text-slate-600'
               }`}
             >
-              <span className="w-12">Sub {i + 1}</span>
+              <span className="w-12 tabular-nums">{typeof x.at === 'number' ? `${x.at}′` : `Sub ${i + 1}`}</span>
               {name(x.on)} on for {name(x.off)}
             </li>
           ))}

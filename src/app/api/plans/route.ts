@@ -24,7 +24,7 @@ export async function GET(request: Request) {
 
     const { data, error } = await supabase
       .from('match_plans')
-      .select('here, lineup, bench, sub_gap, subs, updated_at')
+      .select('here, lineup, bench, sub_gap, subs, schedule, targets, updated_at')
       .eq('match_id', matchId!)
       .maybeSingle();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -57,13 +57,41 @@ export async function PUT(request: Request) {
     const subs = Array.isArray(body.subs)
       ? body.subs
           .filter((x: any) => x && typeof x.on === 'string' && typeof x.off === 'string' && x.on !== x.off)
-          .map((x: any) => ({ on: x.on, off: x.off }))
+          .map((x: any) =>
+            Number.isInteger(x.at) && x.at >= 0 && x.at <= 200 ? { on: x.on, off: x.off, at: x.at } : { on: x.on, off: x.off }
+          )
       : [];
-    const everyone = [...here, ...bench, ...(Object.values(lineup).filter(Boolean) as string[]), ...subs.flatMap((x: any) => [x.on, x.off])];
+    // Game-time targets: player id -> whole % 0–100
+    const targets: Record<string, number> = {};
+    if (body.targets && typeof body.targets === 'object' && !Array.isArray(body.targets)) {
+      for (const [id, v] of Object.entries(body.targets)) {
+        if (!Number.isInteger(v) || (v as number) < 0 || (v as number) > 100) {
+          return NextResponse.json({ error: 'Game time targets must be 0–100%.' }, { status: 400 });
+        }
+        targets[id] = v as number;
+      }
+    }
+    const everyone = [
+      ...here,
+      ...bench,
+      ...(Object.values(lineup).filter(Boolean) as string[]),
+      ...subs.flatMap((x: any) => [x.on, x.off]),
+      ...Object.keys(targets),
+    ];
     if (everyone.some((id) => !inTeam.has(id))) {
       return NextResponse.json({ error: 'The plan has a player who is not in this team.' }, { status: 400 });
     }
-    const gap = Number(body.sub_gap);
+    // Sub windows. Older apps send only sub_gap: one sub every sub_gap minutes.
+    let schedule: { firstAt: number; firstCount: number; every: number; per: number } | null = null;
+    if (body.schedule != null) {
+      const sc = body.schedule;
+      const int = (v: unknown, lo: number, hi: number) => Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi;
+      if (!sc || typeof sc !== 'object' || !int(sc.firstAt, 1, 200) || !int(sc.firstCount, 1, 20) || !int(sc.every, 1, 25) || !int(sc.per, 1, 20)) {
+        return NextResponse.json({ error: 'Sub times must be whole minutes: first subs 1–200, then every 1–25.' }, { status: 400 });
+      }
+      schedule = { firstAt: sc.firstAt, firstCount: sc.firstCount, every: sc.every, per: sc.per };
+    }
+    const gap = schedule ? schedule.every : Number(body.sub_gap);
     if (!Number.isInteger(gap) || gap < 1 || gap > 25) {
       return NextResponse.json({ error: 'Sub gap must be 1–25 minutes.' }, { status: 400 });
     }
@@ -78,6 +106,8 @@ export async function PUT(request: Request) {
         bench,
         sub_gap: gap,
         subs,
+        schedule,
+        targets,
         updated_at: new Date().toISOString(),
         updated_by: coach.userId,
       },

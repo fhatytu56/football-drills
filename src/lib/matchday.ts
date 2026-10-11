@@ -438,17 +438,24 @@ interface Env {
   total: number;
   gap: number;
   goal: Record<string, number>;
+  /** players the coach gave a % (hitting theirs matters more than evening out the rest) */
+  set: Set<string>;
   keepers: (string | null)[];
   players: { id: string; positions: Position[] }[];
   usePositions: boolean;
 }
 
+/** A set % is the coach's call: missing it counts this many times more than an Auto player's. */
+const SET_WEIGHT = 25;
+
 function envOf(s: MatchDayState): Env {
+  const goals = goalsFor(s);
   return {
     format: s.format,
     total: totalMins(s.format),
     gap: Math.max(1, s.subGapMins),
-    goal: goalsFor(s).goal,
+    goal: goals.goal,
+    set: new Set(goals.setIds),
     keepers: keepersOf(s),
     players: s.players,
     usePositions: s.format.spots.length === 7,
@@ -555,6 +562,10 @@ function candidates(sim: Sim, env: Env, t: number) {
       .sort((a, b) => {
         const ia = sim.onPitch[a]!;
         const ib = sim.onPitch[b]!;
+        // a player with a set % who's had it comes off first
+        const da = env.set.has(ia) && need(ia) <= EPS ? 0 : 1;
+        const db = env.set.has(ib) && need(ib) <= EPS ? 0 : 1;
+        if (da !== db) return da - db;
         const d = need(ia) - need(ib);
         if (Math.abs(d) > EPS) return d;
         const fa = env.usePositions && pos.includes(a) ? 0 : 1;
@@ -593,7 +604,7 @@ function rolloutCost(sim: Sim, env: Env) {
   let cost = 0;
   for (const id of Object.keys(env.goal)) {
     const d = playedAt(sim, id, env.total) - env.goal[id];
-    cost += d * d;
+    cost += d * d * (env.set.has(id) ? SET_WEIGHT : 1);
   }
   return cost + subs * 0.5;
 }
@@ -606,8 +617,10 @@ function rolloutCost(sim: Sim, env: Env) {
 function bestPick(sim: Sim, env: Env, t: number) {
   const { ons, offsFor, need } = candidates(sim, env, t);
   const options: ({ on: string; off: string; spot: Spot } | null)[] = [];
-  for (const on of ons.slice(0, 3)) {
-    for (const spot of offsFor(on).slice(0, 3)) {
+  // the top few each way, plus anyone with a set % (they're the coach's call)
+  const pickSome = <T,>(xs: T[], idOf: (x: T) => string) => xs.filter((x, i) => i < 3 || env.set.has(idOf(x)));
+  for (const on of pickSome(ons, (x) => x)) {
+    for (const spot of pickSome(offsFor(on), (sp) => sim.onPitch[sp]!)) {
       const off = sim.onPitch[spot]!;
       if (need(on) > need(off) + EPS) options.push({ on, off, spot });
     }

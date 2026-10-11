@@ -1155,7 +1155,10 @@ function GameTimeEditor({
 
   // The line under the title: does it work, and how fair is it? One sub per window means some
   // players land a window either side of the rest (two keepers make it two); more than that is uneven.
-  const misses = g.setIds.filter((id) => Math.abs((p.minutes[id] || 0) - g.goal[id]) > state.subGapMins + 1e-6);
+  // A set % the plan misses by a tenth of the game or more (5′ of 50′) is called out: subs only
+  // happen at the windows, so with a long gap the nearest one can be a way off.
+  const missBy = Math.max(2.5, total / 10);
+  const misses = g.setIds.filter((id) => Math.abs((p.minutes[id] || 0) - g.goal[id]) >= missBy - 1e-6);
   const autoOut = g.autoIds.filter((id) => !g.inGoal[id]);
   const autoMins = autoOut.map((id) => p.minutes[id] || 0);
   const lo = Math.min(...autoMins);
@@ -1167,7 +1170,12 @@ function GameTimeEditor({
     : g.problem
     ? { ok: false, text: g.problem }
     : misses.length
-    ? { ok: false, text: `${name(misses[0])} gets ${pct(p.minutes[misses[0]] || 0)}%, set to ${targets[misses[0]]}%.` }
+    ? {
+        ok: false,
+        text: `${name(misses[0])} gets ${pct(p.minutes[misses[0]] || 0)}%, set to ${targets[misses[0]]}%.${
+          state.subGapMins > 1 ? ' Sub more often to get closer.' : ''
+        }`,
+      }
     : autoMins.length && hi - lo > 2 * state.subGapMins + 1e-6
     ? { ok: false, text: `Uneven: ${range}. Sub more often.` }
     : {

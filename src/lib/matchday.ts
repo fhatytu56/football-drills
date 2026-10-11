@@ -62,16 +62,30 @@ export interface MatchDayState {
   teamId?: string;
   /** Planned subs in order (from the saved sub plan). Empty = no plan. */
   plan?: PlannedSub[];
-  /** How many subs have been made so far = which plan step is next. */
+  /** How many plan steps are done = which plan step is next. */
   subsMade?: number;
   /** The line-up at kick-off, so Reset > Restart can put it back. */
   startOnPitch?: Partial<Record<Spot, string | null>>;
   startBench?: string[];
+  /** When subs happen. Missing (older saved games) = one every subGapMins. */
+  schedule?: Schedule;
+  /** Game-time targets: player id -> % of the day's playing time. Missing = Auto. */
+  targets?: Record<string, number>;
 }
 
 export interface PlannedSub {
   on: string;
   off: string;
+  /** Minute of playing time it's planned for (older plans don't have it). */
+  at?: number;
+}
+
+/** First window at `firstAt` with `firstCount` subs, then one every `every` minutes with `per` subs. */
+export interface Schedule {
+  firstAt: number;
+  firstCount: number;
+  every: number;
+  per: number;
 }
 
 export function matchMs(s: MatchDayState, now: number) {
@@ -86,13 +100,33 @@ export function periodOver(s: MatchDayState, now: number) {
   return s.phase === 'playing' && matchMs(s, now) - s.periodStartMs >= s.format.halfMins * 60_000;
 }
 
-export function nextSubInMs(s: MatchDayState, now: number) {
-  const t = matchMs(s, now);
-  return Math.max(s.lastSubMs + s.subGapMins * 60_000, s.snoozeUntilMs) - t;
+/**
+ * Match ms the next sub is due. A timed plan: the next step's minute (null once the plan is done).
+ * Older games without times: one every subGapMins after the last sub.
+ */
+export function nextDueMs(s: MatchDayState): number | null {
+  const plan = s.plan || [];
+  if (s.schedule || plan.some((x) => typeof x.at === 'number')) {
+    const step = plan[s.subsMade || 0];
+    return step && typeof step.at === 'number' ? step.at * 60_000 : null;
+  }
+  return s.lastSubMs + s.subGapMins * 60_000;
 }
 
+export function nextSubInMs(s: MatchDayState, now: number) {
+  const due = nextDueMs(s);
+  if (due === null) return Infinity;
+  return Math.max(due, s.snoozeUntilMs) - matchMs(s, now);
+}
+
+/** Due while playing, and at half-time when a window falls on the whistle. */
 export function subDue(s: MatchDayState, now: number) {
-  return s.phase === 'playing' && s.bench.length > 0 && s.subGapMins > 0 && nextSubInMs(s, now) <= 0;
+  return (
+    (s.phase === 'playing' || s.phase === 'break') &&
+    s.bench.length > 0 &&
+    s.subGapMins > 0 &&
+    nextSubInMs(s, now) <= 0
+  );
 }
 
 export function minutesPlayedMs(s: MatchDayState, playerId: string, now: number) {
@@ -210,7 +244,15 @@ export function swap(
     if (goingOff && comingOn) {
       next.lastSubMs = t;
       next.snoozeUntilMs = 0;
-      next.subsMade = (s.subsMade || 0) + 1;
+      // A sub counts as the next plan step when that step is due, or it's exactly that pair.
+      // An early unplanned sub (an injury at 12′) leaves the 15′ step where it is.
+      const i = s.subsMade || 0;
+      const step = (s.plan || [])[i];
+      const timed = !!step && typeof step.at === 'number';
+      const isStep = !!step && step.on === comingOn && step.off === goingOff;
+      if (!timed || isStep || t >= step.at! * 60_000) {
+        next.subsMade = i + 1;
+      }
     }
   }
   return next;
@@ -305,91 +347,246 @@ export function snooze(s: MatchDayState, now: number): MatchDayState {
 
 // ---------- sub plan ----------
 
-/** Sub k (1-based) is due about k x gap minutes into the day's playing time. */
-export function planTimes(format: Format, gapMins: number, count: number) {
-  return Array.from({ length: count }, (_, i) => (i + 1) * gapMins);
+/** The day's playing time in minutes (both halves; both games for U8s/U9s with a Game 2). */
+export function totalMins(format: Format) {
+  return format.halfMins * format.periods;
 }
 
-/** How many subs fit: one every `gap` minutes, none at or after the final whistle. */
-export function planLength(format: Format, gapMins: number, benchSize: number) {
-  if (benchSize === 0 || gapMins <= 0) return 0;
-  const total = format.halfMins * format.periods;
-  return Math.max(0, Math.ceil(total / gapMins) - 1);
+/** Nobody planned off within this many minutes of coming on. */
+export const MIN_STINT = 10;
+
+/** 7-a-side: 2 subs at 10′, then 1 every 5′. 5-a-side: 1 every 5′ (as before). */
+export function defaultSchedule(format: Format): Schedule {
+  return format.spots.length === 7
+    ? { firstAt: 10, firstCount: 2, every: 5, per: 1 }
+    : { firstAt: 5, firstCount: 1, every: 5, per: 1 };
+}
+
+/** The schedule a game uses; older saved games had only "sub every N". */
+export function scheduleOf(s: Pick<MatchDayState, 'schedule' | 'subGapMins' | 'format'>): Schedule {
+  if (s.schedule) return s.schedule;
+  const g = s.subGapMins > 0 ? s.subGapMins : defaultSchedule(s.format).every;
+  return { firstAt: g, firstCount: 1, every: g, per: 1 };
+}
+
+/** Allowed range for each schedule number. */
+export function scheduleLimits(format: Format, benchSize: number, spotsInPlay: number) {
+  const total = totalMins(format);
+  const most = Math.max(1, Math.min(benchSize, spotsInPlay));
+  return {
+    firstAt: { min: 1, max: Math.max(1, total - 1) },
+    firstCount: { min: 1, max: most },
+    every: { min: 1, max: Math.min(25, Math.max(1, total - 1)) },
+    per: { min: 1, max: most },
+  };
+}
+
+export function clampSchedule(format: Format, sch: Schedule, benchSize: number, spotsInPlay: number): Schedule {
+  const lim = scheduleLimits(format, benchSize, spotsInPlay);
+  const c = (v: number, k: keyof Schedule) =>
+    Math.min(lim[k].max, Math.max(lim[k].min, Math.round(Number.isFinite(v) ? v : lim[k].min)));
+  return { firstAt: c(sch.firstAt, 'firstAt'), firstCount: c(sch.firstCount, 'firstCount'), every: c(sch.every, 'every'), per: c(sch.per, 'per') };
+}
+
+/** Sub windows: minute and how many subs. None at or after the final whistle. */
+export function subWindows(format: Format, sch: Schedule) {
+  const total = totalMins(format);
+  const out: { t: number; count: number }[] = [];
+  if (sch.every <= 0) return out;
+  for (let t = sch.firstAt, i = 0; t < total; t += sch.every, i++) out.push({ t, count: i === 0 ? sch.firstCount : sch.per });
+  return out;
 }
 
 type P = { id: string; positions: Position[] };
 
-/**
- * Suggest a fair plan. At each sub: the bench player with the fewest minutes comes on;
- * the outfield player they replace is, for U10s/U11s, preferably one whose spot is in the
- * newcomer's positions, otherwise whoever has played longest. U10s/U11s keeper stays put.
- */
-export function suggestPlan(
-  format: Format,
-  gapMins: number,
-  onPitch: Partial<Record<Spot, string | null>>,
-  bench: string[],
-  players: P[],
-  usePositions: boolean
-): PlannedSub[] {
-  const n = planLength(format, gapMins, bench.length);
-  const pitch = { ...onPitch };
-  let benchNow = [...bench];
-  const mins: Record<string, number> = {};
-  const sinceOn: Record<string, number> = {};
-  for (const id of Object.values(pitch)) if (id) { mins[id] = 0; sinceOn[id] = 0; }
-  for (const id of benchNow) mins[id] = 0;
-  const pos = (id: string) => players.find((p) => p.id === id)?.positions || [];
-  const plan: PlannedSub[] = [];
-  let last = 0;
-  for (let k = 1; k <= n; k++) {
-    const t = k * gapMins;
-    for (const id of Object.values(pitch)) if (id) mins[id] += t - last;
-    last = t;
-    if (!benchNow.length) break;
-    const on = [...benchNow].sort((a, b) => mins[a] - mins[b])[0];
-    const spots = format.spots.filter((sp) => pitch[sp] && !(sp === 'gk' && !format.keeperRotates));
-    if (!spots.length) break;
-    const byMinutes = [...spots].sort(
-      (a, b) => mins[pitch[b]!] - mins[pitch[a]!] || sinceOn[pitch[a]!] - sinceOn[pitch[b]!]
-    );
-    let spot = byMinutes[0];
-    if (usePositions) {
-      const fit = byMinutes.find((sp) => pos(on).includes(sp));
-      // take a like-for-like spot unless that player has had clearly less time (> one gap)
-      if (fit && mins[pitch[fit]!] >= mins[pitch[spot]!] - gapMins) spot = fit;
-    }
-    const off = pitch[spot]!;
-    pitch[spot] = on;
-    sinceOn[on] = t;
-    benchNow = benchNow.filter((x) => x !== on).concat(off);
-    plan.push({ on, off });
-  }
-  return plan;
+export interface PlanInput {
+  format: Format;
+  schedule: Schedule;
+  onPitch: Partial<Record<Spot, string | null>>;
+  bench: string[];
+  players: P[];
+  /** player id -> % of the day's playing time; missing = Auto */
+  targets: Record<string, number>;
+  usePositions: boolean;
 }
 
-/** Minutes each player would get if the plan runs on time. */
-export function plannedMinutes(
-  format: Format,
-  gapMins: number,
-  onPitch: Partial<Record<Spot, string | null>>,
-  plan: PlannedSub[]
-) {
-  const total = format.halfMins * format.periods;
-  const on = new Set(Object.values(onPitch).filter(Boolean) as string[]);
-  const mins: Record<string, number> = {};
-  let last = 0;
-  plan.forEach((sub, i) => {
-    const t = Math.min((i + 1) * gapMins, total);
-    for (const id of on) mins[id] = (mins[id] || 0) + (t - last);
-    last = t;
-    if (on.has(sub.off) && !on.has(sub.on)) {
-      on.delete(sub.off);
-      on.add(sub.on);
+export interface PlanResult {
+  subs: PlannedSub[];
+  /** Windows that have at least one sub, in order. */
+  windows: { t: number; subs: PlannedSub[] }[];
+  total: number;
+  /** U10s/U11s keeper: stays on all game, not in the rotation. */
+  keeper: string | null;
+  /** Players sharing the other spots: starters in spot order, then the bench. */
+  rotating: string[];
+  starters: string[];
+  /** Planned minutes and time on the pitch, per player. */
+  minutes: Record<string, number>;
+  stints: Record<string, [number, number][]>;
+  /** Minutes each rotating player is aiming for (their target, or an even share of what's left). */
+  goal: Record<string, number>;
+  /** % an Auto player is aiming for. */
+  autoPct: number;
+  /** Something about the targets can't work. */
+  problem: string | null;
+  /** Players with a target the plan misses by more than one gap. */
+  misses: string[];
+}
+
+const EPS = 1e-6;
+
+/**
+ * Plan the subs from game-time targets.
+ * At each window the bench player furthest behind their target comes on, for the player
+ * furthest ahead of theirs (never someone who came on under MIN_STINT minutes ago).
+ * Like-for-like position only breaks a tie, so it never costs anyone minutes.
+ * A sub only happens if it brings both players closer to their targets.
+ */
+export function buildPlan(input: PlanInput): PlanResult {
+  const { format, schedule, onPitch, players, usePositions } = input;
+  const total = totalMins(format);
+  const keeper = !format.keeperRotates ? onPitch.gk || null : null;
+  const pitch: Partial<Record<Spot, string>> = {};
+  for (const sp of format.spots) {
+    const id = onPitch[sp];
+    if (id && !(sp === 'gk' && !format.keeperRotates)) pitch[sp] = id;
+  }
+  const spots = format.spots.filter((sp) => pitch[sp]);
+  const starters = spots.map((sp) => pitch[sp]!);
+  let bench = input.bench.filter((id) => id !== keeper && !starters.includes(id));
+  const rotating = [...starters, ...bench];
+  const rank: Record<string, number> = {};
+  rotating.forEach((id, i) => (rank[id] = i));
+
+  // targets -> goal minutes
+  const cap = spots.length * total;
+  const pctOf = (id: string) => {
+    const v = input.targets[id];
+    return typeof v === 'number' && Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : null;
+  };
+  const setIds = rotating.filter((id) => pctOf(id) !== null);
+  const autoIds = rotating.filter((id) => pctOf(id) === null);
+  const setMins = setIds.reduce((a, id) => a + (pctOf(id)! / 100) * total, 0);
+  const autoMins = autoIds.length ? (cap - setMins) / autoIds.length : 0;
+  const goal: Record<string, number> = {};
+  for (const id of rotating) goal[id] = pctOf(id) !== null ? (pctOf(id)! / 100) * total : Math.min(total, Math.max(0, autoMins));
+
+  const since: Record<string, number> = {};
+  const played: Record<string, number> = {};
+  const stints: Record<string, [number, number][]> = {};
+  for (const id of rotating) {
+    played[id] = 0;
+    stints[id] = [];
+  }
+  for (const id of starters) since[id] = 0;
+  const pos = (id: string) => players.find((p) => p.id === id)?.positions || [];
+
+  const subs: PlannedSub[] = [];
+  const windows: PlanResult['windows'] = [];
+  if (bench.length && spots.length) {
+    for (const w of subWindows(format, schedule)) {
+      const t = w.t;
+      const need = (id: string) => goal[id] - played[id] - (since[id] !== undefined ? t - since[id] : 0);
+      const wentOff = new Set<string>();
+      const made: PlannedSub[] = [];
+      for (let k = 0; k < w.count; k++) {
+        let on: string | null = null;
+        for (const id of bench) {
+          if (wentOff.has(id)) continue;
+          if (on === null || need(id) > need(on) + EPS) on = id;
+        }
+        if (!on) break;
+        let spot: Spot | null = null;
+        for (const sp of spots) {
+          const id = pitch[sp]!;
+          if (t - since[id] < MIN_STINT) continue;
+          if (spot === null) {
+            spot = sp;
+            continue;
+          }
+          const cur = pitch[spot]!;
+          const d = need(id) - need(cur);
+          if (d < -EPS) spot = sp;
+          else if (d <= EPS) {
+            const fit = usePositions && pos(on).includes(sp);
+            const curFit = usePositions && pos(on).includes(spot);
+            if (fit !== curFit) {
+              if (fit) spot = sp;
+            } else if (since[id] !== since[cur]) {
+              if (since[id] < since[cur]) spot = sp;
+            } else if (rank[id] < rank[cur]) spot = sp;
+          }
+        }
+        if (!spot) break;
+        const off = pitch[spot]!;
+        if (need(on) <= need(off) + EPS) break;
+        stints[off].push([since[off], t]);
+        played[off] += t - since[off];
+        delete since[off];
+        pitch[spot] = on;
+        since[on] = t;
+        bench = bench.filter((x) => x !== on).concat(off);
+        wentOff.add(off);
+        const sub = { on, off, at: t };
+        made.push(sub);
+        subs.push(sub);
+      }
+      if (made.length) windows.push({ t, subs: made });
     }
-  });
-  for (const id of on) mins[id] = (mins[id] || 0) + (total - last);
-  return mins;
+  }
+  for (const id of Object.values(pitch)) {
+    if (!id) continue;
+    stints[id].push([since[id], total]);
+    played[id] += total - since[id];
+  }
+
+  const minutes: Record<string, number> = { ...played };
+  if (keeper) {
+    minutes[keeper] = total;
+    stints[keeper] = [[0, total]];
+  }
+
+  let problem: string | null = null;
+  if (rotating.length > spots.length && spots.length) {
+    if (setMins > cap + EPS) problem = 'Targets add up to more than the pitch holds.';
+    else if (!autoIds.length && setMins < cap - EPS) problem = 'Targets leave a spot empty. Raise someone.';
+    else if (autoMins > total + EPS) problem = 'Auto players would need over 100%.';
+  }
+  const misses = setIds.filter((id) => Math.abs(played[id] - goal[id]) > schedule.every + EPS);
+
+  return {
+    subs,
+    windows,
+    total,
+    keeper,
+    rotating,
+    starters,
+    minutes,
+    stints,
+    goal,
+    autoPct: Math.min(100, Math.max(0, (autoMins / total) * 100)),
+    problem,
+    misses,
+  };
+}
+
+/** The plan inputs a game holds. */
+export function planInputOf(s: MatchDayState): PlanInput {
+  return {
+    format: s.format,
+    schedule: scheduleOf(s),
+    onPitch: s.onPitch,
+    bench: s.bench,
+    players: s.players,
+    targets: s.targets || {},
+    usePositions: s.format.spots.length === 7,
+  };
+}
+
+/** Re-plan a game that hasn't kicked off (after a line-up, schedule or target change). */
+export function withPlan(s: MatchDayState): MatchDayState {
+  const schedule = scheduleOf(s);
+  return { ...s, schedule, subGapMins: schedule.every, plan: buildPlan(planInputOf(s)).subs, subsMade: 0 };
 }
 
 /** The planned sub that's next, and whether it can still happen right now. */

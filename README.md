@@ -52,14 +52,14 @@ Database changes live in `supabase/migrations/002_age_groups.sql` (run once in t
 
 ## Match Day (coaches only)
 
-Pick an upcoming match (players who said Yes are ticked) or a quick game, untick anyone missing, set **Sub every N minutes**, check the starting line-up (U10s/U11s are placed by main then second position; the keeper spot is left empty if nobody has GK), then **Kick off**.
+Pick an upcoming match (players who said Yes are ticked) or a quick game, untick anyone missing, check the starting line-up and the sub plan under it (U10s/U11s are placed by main then second position; the keeper spot is left empty if nobody has GK), then **Kick off**.
 
 - Halves: U8s/U9s 12 min, two games if the match has a Game 2; U10s/U11s 25 min, one game.
 - When a sub is due: beep + banner. Nothing changes until the coach taps who's coming off and who's going on. "Not now" snoozes 1 minute.
 - Tap two pitch players to swap spots (not a sub). Bench is sorted by fewest minutes.
 - The clock is worked out from the time on the phone, not by ticking, so it stays right if the phone locks — but a locked phone can't beep. The app asks the phone to keep the screen on and tells coaches to keep it unlocked.
 - The live match lives on the coach's phone (survives a reload).
-- **Sub plan:** on the line-up screen the app suggests a fair order (fewest minutes comes on; U10s/U11s like-for-like where possible, keeper left alone) with the minutes each player would get. Change any pair, remove or add subs, then **Save plan** — it's stored per match (`match_plans`, migration 006) and the other coaches of that group get it when they open the match. During the game the sub banner shows the planned pair with **Done**; the coach can always tap different players instead, and the plan carries on with the next sub. Quick games get a plan too, but it stays on that phone.
+- **Sub plan:** on the line-up screen. Set when subs happen (**First subs at** 10′, **How many** 2, **Then every** 5′, **How many** 1 — the 7-a-side default; 5-a-side starts at 1 every 5′) and, if you want, a **game-time %** for any player (tap them; **Auto** players share what's left evenly). The app plans the subs: at each window the bench player furthest behind their target comes on for the player furthest ahead of theirs, nobody comes off within 10′ of coming on, and U10s/U11s like-for-like position only breaks ties. The U10s/U11s keeper stays on. A timeline shows each player's planned time; the line under the settings goes amber if the targets can't work. **Save plan** stores line-up, sub times, targets and subs per match (`match_plans`, migrations 006 + 008) for the other coaches of that group. During the game the alert goes off at each planned minute (a half-time window shows at half-time) with the planned pair and **Done**; the coach can tap different players instead and the plan carries on. An early unplanned sub (e.g. an injury) doesn't skip the next planned one. Quick games get a plan too, but it stays on that phone.
 
 ## Squads (coaches only)
 

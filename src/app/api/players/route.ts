@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { cleanName, cleanPositions, getGroup, type AgeGroup } from '@/lib/groups';
-import { requireCoach } from '@/lib/coach';
+import { friendlyLockError, requireCoach } from '@/lib/coach';
+
+const OWN_TEAM_ONLY = 'You can only add players to, or move them between, your own team(s).';
 
 type Supabase = Awaited<ReturnType<typeof createClient>>;
 
@@ -38,7 +40,7 @@ export async function POST(request: Request) {
       .insert([{ age_group: group.id, team_id: team.teamId, first_name, positions: cleanPositions(group, body.positions) }])
       .select()
       .single();
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (error) return NextResponse.json({ error: friendlyLockError(error.message, OWN_TEAM_ONLY) }, { status: 400 });
     return NextResponse.json({ data }, { status: 201 });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Server error' }, { status: 500 });
@@ -71,7 +73,7 @@ export async function PATCH(request: Request) {
     if ('positions' in body) update.positions = cleanPositions(group, body.positions);
 
     const { error } = await supabase.from('players').update(update).eq('id', body.id);
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (error) return NextResponse.json({ error: friendlyLockError(error.message, OWN_TEAM_ONLY) }, { status: 400 });
     return NextResponse.json({ success: true });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Server error' }, { status: 500 });

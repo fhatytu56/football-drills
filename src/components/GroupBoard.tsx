@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Plus, Trash2, Play, Pause, RotateCcw, ArrowUp, ArrowDown, Timer, Clock, AlertTriangle, X, ExternalLink, ChevronLeft, LogIn, LogOut } from 'lucide-react';
+import { Plus, Trash2, Play, Pause, RotateCcw, ArrowUp, ArrowDown, Timer, Clock, AlertTriangle, X, ExternalLink, ChevronLeft, LogIn, LogOut, KeyRound } from 'lucide-react';
 import AddDrillModal from '@/components/AddDrillModal';
 import SquadPanel from '@/components/SquadPanel';
 import ParentsPanel from '@/components/ParentsPanel';
@@ -310,6 +310,16 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
                 <LogIn className="w-4 h-4" /> Coach sign in
               </Link>
             ) : null}
+            {signedIn && (
+              <Link
+                href={`/account?next=/${group.id}`}
+                title="Change password"
+                aria-label="Change password"
+                className="text-emerald-200 hover:text-white p-1.5 rounded-lg hover:bg-emerald-900/60"
+              >
+                <KeyRound className="w-4 h-4" />
+              </Link>
+            )}
             {signedIn && (
               <form action={signOut}>
                 <button

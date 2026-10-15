@@ -77,19 +77,40 @@ Database: `supabase/migrations/004_matches.sql`. Parents never get table access;
 
 ## Coach accounts
 
-1. Supabase → Authentication → Users → **Add user** → *Create new user*. Enter the coach's email + a password, tick **Auto Confirm User**.
-2. Supabase → SQL Editor, give them their group(s):
+Two kinds of coach per age group:
+
+- **Coordinator** — every team in the age group. Only coordinators add, rename or delete teams, and see players with no team.
+- **Team coach** — only their own team(s): squad, matches, parents' answers, sub plan, Match Day. Other teams in the group are hidden, by the database not just the screen.
+
+Everyone in an age group shares its drills and training plans. Database: `supabase/migrations/009_team_lock.sql`.
+
+1. Supabase → Authentication → Users → **Add user** → *Create new user*. Enter the coach's email + a temporary password, tick **Auto Confirm User**. Coaches change it themselves: key icon at the top of their age group → **Change password**.
+2. Supabase → SQL Editor, give them their group:
    ```sql
-   insert into coach_groups (user_id, age_group)
-   select id, 'u8' from auth.users where email = 'coach@example.com';
+   insert into coach_groups (user_id, age_group, all_teams)
+   select id, 'u9', false from auth.users where email = 'coach@example.com';
    ```
-   Use `'u8'`, `'u9'`, `'u10'` or `'u11'`. Run it again with another group to give a coach more than one.
-3. To remove access:
+   `all_teams` `true` = coordinator, `false` = team coach. Groups: `'academy'`, `'u8'`, `'u9'`, `'u10'`, `'u11'`.
+3. Team coaches only: link their team (name exactly as in Squads; run again for a second team):
+   ```sql
+   insert into coach_teams (user_id, team_id)
+   select u.id, t.id from auth.users u, teams t
+   where u.email = 'coach@example.com' and t.age_group = 'u9' and t.name = '9.5';
+   ```
+4. To remove access:
    ```sql
    delete from coach_groups
-   where age_group = 'u8'
+   where age_group = 'u9'
      and user_id = (select id from auth.users where email = 'coach@example.com');
    ```
+   (A team coach with no `coach_groups` row sees nothing, even if `coach_teams` still lists them.)
+5. Forgotten password (Supabase can't email coaches without your own email service): set a new temporary one, and tell the coach to change it.
+   ```sql
+   update auth.users set encrypted_password = extensions.crypt('new-temp-password', extensions.gen_salt('bf'))
+   where email = 'coach@example.com';
+   ```
+
+Keep lists of real coaches' emails out of this repo — it's public.
 
 ## Deploy (Vercel)
 

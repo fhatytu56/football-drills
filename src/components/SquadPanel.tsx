@@ -35,6 +35,8 @@ async function send(url: string, method: string, body?: unknown) {
 export default function SquadPanel({ group }: { group: AgeGroup }) {
   const [teams, setTeams] = useState<Team[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
+  // Coordinators see every team and manage them. A team coach only gets their own team(s).
+  const [allTeams, setAllTeams] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +51,7 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
       const data = await send(`/api/squad?group=${group.id}`, 'GET');
       setTeams(data.teams || []);
       setPlayers(data.players || []);
+      setAllTeams(data.allTeams !== false);
       setError(null);
     } catch (e: any) {
       setError(e.message);
@@ -123,7 +126,11 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
           {teams.length} {teams.length === 1 ? 'team' : 'teams'}.
           {group.usesPositions && ' Tap a player to set their main and second position on the pitch.'}
         </p>
-        <p className="text-[11px] text-slate-400 mt-1">First names only. Only {group.label} coaches can see this.</p>
+        <p className="text-[11px] text-slate-400 mt-1">
+          {allTeams
+            ? `First names only. Only ${group.label} coaches can see this.`
+            : `First names only. Only ${teams.map((t) => t.name).join(' and ') || 'your team'}'s coaches and the ${group.label} coordinators can see this.`}
+        </p>
       </div>
 
       {error && (
@@ -173,7 +180,7 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
                       · {list.length} {list.length === 1 ? 'player' : 'players'}
                     </span>
                   </h3>
-                  {team && (
+                  {team && allTeams && (
                     <div className="flex items-center gap-1">
                       <button
                         aria-label={`Rename ${team.name}`}
@@ -206,6 +213,7 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
                     group={group}
                     player={p}
                     teams={teams}
+                    allTeams={allTeams}
                     onCancel={() => setEditing(null)}
                     onSave={async (update) => {
                       if (await run(() => send('/api/players', 'PATCH', { id: p.id, ...update }))) setEditing(null);
@@ -272,11 +280,18 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
 
       {teams.length === 0 && (
         <div className="text-center py-6 bg-white rounded-xl border border-slate-200 p-4">
-          <p className="text-slate-500 font-medium text-sm">No teams yet.</p>
-          <p className="text-slate-400 text-xs mt-1">Create your first team below, e.g. &quot;{teamHint(group, 1)}&quot;.</p>
+          <p className="text-slate-500 font-medium text-sm">{allTeams ? 'No teams yet.' : "You're not linked to a team yet."}</p>
+          <p className="text-slate-400 text-xs mt-1">
+            {allTeams ? (
+              <>Create your first team below, e.g. &quot;{teamHint(group, 1)}&quot;.</>
+            ) : (
+              `Ask the ${group.label} coordinator to link you to your team.`
+            )}
+          </p>
         </div>
       )}
 
+      {allTeams && (
       <form onSubmit={addTeam} className="flex gap-2 bg-emerald-50 border border-emerald-200 rounded-xl p-3">
         <input
           aria-label="New team name"
@@ -293,6 +308,7 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
           <Plus className="w-4 h-4" /> New team
         </button>
       </form>
+      )}
     </div>
   );
 }
@@ -301,6 +317,7 @@ function PlayerEditor({
   group,
   player,
   teams,
+  allTeams,
   onSave,
   onCancel,
   onDelete,
@@ -308,6 +325,8 @@ function PlayerEditor({
   group: AgeGroup;
   player: Player;
   teams: Team[];
+  /** Team coaches can't move a player to "No team" (or to a team they can't see). */
+  allTeams: boolean;
   onSave: (update: { first_name: string; team_id: string | null; positions: Position[] }) => void;
   onCancel: () => void;
   onDelete: () => void;
@@ -338,19 +357,21 @@ function PlayerEditor({
             onChange={(e) => setName(e.target.value)}
             className="flex-1 min-w-0 px-3 py-2 border border-slate-300 rounded-lg text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600"
           />
-          <select
-            aria-label="Team"
-            value={teamId}
-            onChange={(e) => setTeamId(e.target.value)}
-            className="w-28 shrink-0 px-2 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
-          >
-            <option value="">No team</option>
-            {teams.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
+          {(allTeams || teams.length > 1) && (
+            <select
+              aria-label="Team"
+              value={teamId}
+              onChange={(e) => setTeamId(e.target.value)}
+              className="w-28 shrink-0 px-2 py-2 border border-slate-300 rounded-lg text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
+            >
+              {allTeams && <option value="">No team</option>}
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
 
         {group.usesPositions && <PositionPitch value={positions} onChange={setPositions} />}

@@ -24,7 +24,8 @@ export async function GET(request: Request) {
     const error = teams.error || players.error;
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-    return NextResponse.json({ teams: teams.data, players: players.data });
+    // allTeams = coordinator. A team coach only gets their own team(s) and its players back (RLS).
+    return NextResponse.json({ teams: teams.data, players: players.data, allTeams: coach.lead });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Server error' }, { status: 500 });
   }

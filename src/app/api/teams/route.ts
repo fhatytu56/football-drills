@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     if (!name) return NextResponse.json({ error: 'Team name must be 1–30 characters.' }, { status: 400 });
 
     const supabase = await createClient();
-    const coach = await requireCoach(supabase, group.id);
+    const coach = await requireCoach(supabase, group.id, { lead: true });
     if (coach instanceof NextResponse) return coach;
 
     const { data, error } = await supabase.from('teams').insert([{ age_group: group.id, name }]).select().single();
@@ -41,7 +41,7 @@ export async function PATCH(request: Request) {
     const supabase = await createClient();
     const group = await groupOfTeam(supabase, body.id);
     if (!group) return NextResponse.json({ error: 'Team not found' }, { status: 404 });
-    const coach = await requireCoach(supabase, group.id);
+    const coach = await requireCoach(supabase, group.id, { lead: true });
     if (coach instanceof NextResponse) return coach;
 
     const { error } = await supabase.from('teams').update({ name }).eq('id', body.id);
@@ -61,7 +61,7 @@ export async function DELETE(request: Request) {
     const supabase = await createClient();
     const group = await groupOfTeam(supabase, id);
     if (!group) return NextResponse.json({ error: 'Team not found' }, { status: 404 });
-    const coach = await requireCoach(supabase, group.id);
+    const coach = await requireCoach(supabase, group.id, { lead: true });
     if (coach instanceof NextResponse) return coach;
 
     const { error } = await supabase.from('teams').delete().eq('id', id);

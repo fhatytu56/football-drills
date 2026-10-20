@@ -28,9 +28,9 @@ export default function PickGroupPage() {
               href={`/${g.id}`}
               className={`${AGE_GROUPS.length % 2 === 1 && i === 0 ? 'col-span-2 ' : ''}group bg-white rounded-2xl p-4 shadow-md hover:shadow-lg hover:bg-emerald-50 transition flex flex-col`}
             >
-              <span className="flex items-center justify-between">
-                <span className="text-2xl font-black text-emerald-900 tracking-tight">{g.label}</span>
-                <ChevronRight className="w-5 h-5 text-emerald-700 group-hover:translate-x-0.5 transition" />
+              <span className="flex items-center justify-between gap-1">
+                <span className="text-[clamp(1rem,10.5vw_-_1.1rem,1.5rem)] leading-8 font-black text-emerald-900 tracking-tight whitespace-nowrap">{g.label}</span>
+                <ChevronRight className="w-5 h-5 shrink-0 text-emerald-700 group-hover:translate-x-0.5 transition" />
               </span>
               <span className="mt-1 text-xs font-semibold text-slate-500">
                 {daysShort(g)}

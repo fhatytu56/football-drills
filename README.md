@@ -36,25 +36,26 @@ Mobile-first web app to archive and collate youth football training drills.
 
 ## Age groups
 
-The home page lets people pick Academy, U8s, U9s, U10s or U11s. Each group has its own drills and its own two training days (set in `src/lib/groups.ts`):
+The home page lets people pick Academy, U8s, U9s, U9 Girls, U10s or U11s. Each group has its own drills and its own two training days (set in `src/lib/groups.ts`):
 
 | Group | Training days |
 |---|---|
 | Academy | Sunday |
 | U8s | Wednesday, Friday |
 | U9s | Tuesday, Friday |
+| U9 Girls | Tuesday, Thursday |
 | U10s | Tuesday, Thursday |
 | U11s | Tuesday, Thursday |
 
 Anyone can view. Only coaches linked to a group can add/delete drills or change that group's session plans.
 
-Database changes live in `supabase/migrations/002_age_groups.sql` (run once in the Supabase SQL Editor).
+Database changes live in `supabase/migrations/002_age_groups.sql` (run once in the Supabase SQL Editor). U9 Girls (`u9g`) was added in `010_u9_girls.sql`; it plays like U9s (5-a-side, two games on the day, no positions).
 
 ## Match Day (coaches only)
 
 Pick an upcoming match (players who said Yes are ticked) or a quick game, untick anyone missing, check the starting line-up and the sub plan under it (U10s/U11s are placed by main then second position; the keeper spot is left empty if nobody has GK), then **Kick off**.
 
-- Halves: U8s/U9s 12 min, two games if the match has a Game 2; U10s/U11s 25 min, one game.
+- Halves: U8s/U9s/U9 Girls/Academy 12 min, two games if the match has a Game 2; U10s/U11s 25 min, one game.
 - When a sub is due: beep + banner. Nothing changes until the coach taps who's coming off and who's going on. "Not now" snoozes 1 minute.
 - Tap two pitch players to swap spots (not a sub). Bench is sorted by fewest minutes.
 - The clock is worked out from the time on the phone, not by ticking, so it stays right if the phone locks — but a locked phone can't beep. The app asks the phone to keep the screen on and tells coaches to keep it unlocked.
@@ -69,7 +70,7 @@ Only that age group's coaches can see or change its squad. Database: `supabase/m
 
 ## Parents (coaches only)
 
-Coaches add a match (team, date, meet time, kick-off, opponent, home/away, location, kit, notes; U8s/U9s can add a second game on the day). **Share to WhatsApp** opens WhatsApp with the message written, ending in a secret link. Parents tap their child's name and Yes/No — no login. The link only shows that team's first names and stops working the day after the match. Coaches can also set answers themselves.
+Coaches add a match (team, date, meet time, kick-off, opponent, home/away, location, kit, notes; U8s/U9s/U9 Girls/Academy can add a second game on the day). **Share to WhatsApp** opens WhatsApp with the message written, ending in a secret link. Parents tap their child's name and Yes/No — no login. The link only shows that team's first names and stops working the day after the match. Coaches can also set answers themselves.
 
 Database: `supabase/migrations/004_matches.sql`. Parents never get table access; they only reach two database functions (`rsvp_match`, `rsvp_answer`) that check the secret link.
 
@@ -84,13 +85,15 @@ Two kinds of coach per age group:
 
 Everyone in an age group shares its drills and training plans. Database: `supabase/migrations/009_team_lock.sql`.
 
+A team can move to another age group (e.g. 9.6 Girls from U9s to U9 Girls): `update teams set age_group = 'u9g' where id = '…'` carries its players, matches, parents' answers and sub plans with it (`010_u9_girls.sql` makes the links follow). Its coaches then need a `coach_groups` row for the new group.
+
 1. Supabase → Authentication → Users → **Add user** → *Create new user*. Enter the coach's email + a temporary password, tick **Auto Confirm User**. Coaches change it themselves: key icon at the top of their age group → **Change password**.
 2. Supabase → SQL Editor, give them their group:
    ```sql
    insert into coach_groups (user_id, age_group, all_teams)
    select id, 'u9', false from auth.users where email = 'coach@example.com';
    ```
-   `all_teams` `true` = coordinator, `false` = team coach. Groups: `'academy'`, `'u8'`, `'u9'`, `'u10'`, `'u11'`.
+   `all_teams` `true` = coordinator, `false` = team coach. Groups: `'academy'`, `'u8'`, `'u9'`, `'u9g'` (U9 Girls), `'u10'`, `'u11'`.
 3. Team coaches only: link their team (name exactly as in Squads; run again for a second team):
    ```sql
    insert into coach_teams (user_id, team_id)

@@ -47,7 +47,7 @@ export async function requireCoach(
   }
   if (!groups.includes(group)) {
     return NextResponse.json(
-      { error: `Your account isn't set up to edit ${group.toUpperCase()}.` },
+      { error: `Your account isn't set up to edit ${getGroup(group)?.label || group.toUpperCase()}.` },
       { status: 403 }
     );
   }

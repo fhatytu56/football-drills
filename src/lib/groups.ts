@@ -1,5 +1,5 @@
 export type TrainingDay = 'tuesday' | 'wednesday' | 'thursday' | 'friday' | 'sunday';
-export type GroupId = 'academy' | 'u8' | 'u9' | 'u10' | 'u11';
+export type GroupId = 'academy' | 'u8' | 'u9' | 'u9g' | 'u10' | 'u11';
 
 export interface AgeGroup {
   id: GroupId;
@@ -18,6 +18,7 @@ export const AGE_GROUPS: AgeGroup[] = [
   { id: 'academy', label: 'Academy', days: ['sunday'], teamExample: 'Academy 1', aSide: 5, usesPositions: false },
   { id: 'u8', label: 'U8s', days: ['wednesday', 'friday'], teamExample: '8.1', aSide: 5, usesPositions: false },
   { id: 'u9', label: 'U9s', days: ['tuesday', 'friday'], teamExample: '9.1', aSide: 5, usesPositions: false },
+  { id: 'u9g', label: 'U9 Girls', days: ['tuesday', 'thursday'], teamExample: '9.6 Girls', aSide: 5, usesPositions: false },
   { id: 'u10', label: 'U10s', days: ['tuesday', 'thursday'], teamExample: '10.1', aSide: 7, usesPositions: true },
   { id: 'u11', label: 'U11s', days: ['tuesday', 'thursday'], teamExample: '11.1', aSide: 7, usesPositions: true },
 ];
@@ -69,7 +70,7 @@ export function daysShort(group: AgeGroup) {
   return group.days.map((d) => DAY_LABEL[d].short).join(' & ');
 }
 
-/** Next team name hint: "10.1" -> "10.3" for the 3rd team; "Academy 1" -> "Academy 2". */
+/** Next team name hint: "10.1" -> "10.3" for the 3rd team; "Academy 1" -> "Academy 2"; "9.6 Girls" stays as is. */
 export function teamHint(group: AgeGroup, n: number) {
   return group.teamExample.replace(/\d+$/, String(n));
 }

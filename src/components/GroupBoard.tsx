@@ -419,7 +419,7 @@ export default function GroupBoard({ group, canEdit, signedIn }: GroupBoardProps
                     </div>
                     <div className="flex flex-wrap gap-1.5 mb-3">
                       <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-md">
-                        {drill.age_category}
+                        {group.label}
                       </span>
                       <span className="text-[10px] uppercase font-bold px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md">
                         {(drill.game_phase || '').replace('_', ' ')}

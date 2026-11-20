@@ -270,11 +270,6 @@ function defOf(slot: Slot, st: Stats) {
   return 0.4 * st.tackling + 0.6 * st.positioning;
 }
 
-/** Playing someone where the coaches haven't put them costs a little. Anyone can go in goal. */
-export function fits(p: GamePlayer, slot: Slot) {
-  return slot === 'gk' || p.positions.length === 0 || p.positions.includes(slot);
-}
-
 const EMPTY: Stats = { passing: 3, dribbling: 3, shooting: 3, tackling: 3, positioning: 3, keeping: 3, fitness: 3 };
 
 /** Energy 0–100 makes a tired player play like a weaker one (100 = full strength, 0 = 70%). */
@@ -292,7 +287,7 @@ export function teamStrength(s: Save, lineup: Lineup, energy?: Record<string, nu
     const p = lineup[slot] ? s.players[lineup[slot]!] : undefined;
     const st = p ? p.s : EMPTY;
     const e = p ? energyFactor(energy?.[p.id]) : 1;
-    const k = (p && !fits(p, slot) ? 0.92 : 1) * e;
+    const k = e; // anyone can play anywhere: only their stats matter
     att += ATT_WEIGHT[slot] * attOf(slot, st) * k;
     def += DEF_WEIGHT[slot] * defOf(slot, st) * k;
     pas += (st.passing * e) / 7;

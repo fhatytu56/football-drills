@@ -12,7 +12,7 @@ import { divisionFor, shortName } from '@/lib/game/ddsl';
 import {
   STATS, SLOTS, PHASE_LABEL, PHASE_STATS, DRILLS_PER_SESSION,
   newSave, syncSquad, runSession, weekState, currentWeek, nextWeek, dayOf, ourCupTie,
-  table, seasonOver, autoLineup, fits, cupRoundIn, summary,
+  table, seasonOver, autoLineup, cupRoundIn, summary,
   type Save, type PlanDrill, type LibDrill, type MatchResult, type SessionResult, type Slot, type StatKey,
 } from '@/lib/game/engine';
 import {
@@ -805,8 +805,6 @@ function Tactics({ save, update, locked }: { save: Save; update: (fn: (s: Save) 
           <div key={i} className="flex justify-center gap-2">
             {r.map((slot) => {
               const id = save.lineup[slot];
-              const p = id ? save.players[id] : undefined;
-              const off = p && !fits(p, slot);
               return (
                 <label key={slot} className="flex flex-col items-center w-[31%]">
                   <span className="text-[10px] font-bold text-green-100">{SLOTS.find((x) => x.id === slot)?.short}</span>
@@ -814,14 +812,13 @@ function Tactics({ save, update, locked }: { save: Save; update: (fn: (s: Save) 
                     aria-label={`Player at ${slot}`}
                     value={id || ''}
                     onChange={(e) => set(slot, e.target.value)}
-                    className={`w-full text-xs px-1 py-1 bg-slate-900 border ${off ? 'border-amber-400' : 'border-slate-500'} text-slate-100`}
+                    className="w-full text-xs px-1 py-1 bg-slate-900 border border-slate-500 text-slate-100"
                   >
                     <option value="">— empty —</option>
                     {players.map((pl) => (
                       <option key={pl.id} value={pl.id}>{pl.name}{inTeam.has(pl.id) && pl.id !== id ? ' (in team)' : ''}</option>
                     ))}
                   </select>
-                  {off && <span className="text-[9px] text-amber-200">not their position</span>}
                 </label>
               );
             })}
@@ -829,7 +826,7 @@ function Tactics({ save, update, locked }: { save: Save; update: (fn: (s: Save) 
         ))}
       </div>
       <p className="text-[11px] text-slate-300 mt-2">
-        <b>Attack</b> scores more but lets in more; <b>Defend</b> the opposite. You can change it during the match too. Picking someone already in the team swaps them. Players out of their usual position play a bit worse. Your keeper’s <b>GK</b> number matters most in goal.
+        <b>Attack</b> scores more but lets in more; <b>Defend</b> the opposite. You can change it during the match too. Picking someone already in the team swaps them. Play anyone anywhere: what counts is their numbers (a striker needs Shooting, a defender Tackling and Positioning). Your keeper’s <b>GK</b> number matters most in goal.
       </p>
       <p className="text-[11px] text-slate-400 mt-1">Subs: {players.filter((p) => !inTeam.has(p.id)).map((p) => p.name).join(', ') || 'none'}</p>
     </Panel>
@@ -1248,7 +1245,7 @@ function LiveScreen({ save, update, onFinished }: { save: Save; update: (fn: (s:
                 className={`w-full flex items-center gap-2 text-left text-xs px-2 py-1 border ${subSlot === slot ? 'border-amber-300 bg-slate-700' : 'border-slate-600 bg-slate-800'}`}
               >
                 <span className="w-7 font-bold text-slate-300">{short}</span>
-                <span className="flex-1 font-bold">{p?.name || '— empty —'}{p && !fits(p, slot) && <span className="text-amber-200 font-normal"> · not usual position</span>}</span>
+                <span className="flex-1 font-bold">{p?.name || '— empty —'}</span>
                 <EnergyBar e={e} />
               </button>
             );

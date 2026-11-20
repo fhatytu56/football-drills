@@ -1,19 +1,24 @@
 'use client';
 
 // Wayside U10 Manager — a Championship Manager 99/00-style game for the kids.
-// Everyone starts equal. Players only improve by "running" the real Tuesday/Thursday drills,
-// which means remembering them. Weeks go at the kid's own pace: Tue, Thu, Sunday match, Next week.
+// Everyone starts equal. Players improve through the drills the kid picks for Tuesday and Thursday,
+// plus each player's own focus. Sunday's match is watched live with commentary, subs, tactics and
+// a half-time team talk. Weeks go at the kid's own pace.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { divisionFor, shortName } from '@/lib/game/ddsl';
 import {
-  STATS, SLOTS, PHASE_LABEL, PHASE_STATS,
-  newSave, syncSquad, playWeek, questionsFor, runSession, weekState, currentWeek, nextWeek, dayOf,
+  STATS, SLOTS, PHASE_LABEL, PHASE_STATS, DRILLS_PER_SESSION,
+  newSave, syncSquad, runSession, weekState, currentWeek, nextWeek, dayOf, ourCupTie,
   table, seasonOver, autoLineup, fits, cupRoundIn, summary,
-  type Save, type PlanDrill, type LibDrill, type Question, type MatchResult, type SessionResult, type Slot, type StatKey,
+  type Save, type PlanDrill, type LibDrill, type MatchResult, type SessionResult, type Slot, type StatKey,
 } from '@/lib/game/engine';
+import {
+  startLive, stepLive, subLive, setTactic, teamTalk, completeLive, rates, HALF, FULL, TACTICS, TALKS,
+  type LiveMatch, type Tactic,
+} from '@/lib/game/match';
 
 interface TeamData {
   team: string;
@@ -143,11 +148,11 @@ export default function GameApp({ token }: { token: string }) {
     if (e) { pending.current = pending.current || s; setSaveState('error'); } else if (!pending.current) setSaveState('saved');
   }, [supabase, acct]);
 
+  // Throttled, not debounced: a match ticking every 150 ms must still save at least every 0.8 s.
   const persist = useCallback((s: Save) => {
     pending.current = s;
     setSaveState('saving');
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(flush, 800);
+    if (!timer.current) timer.current = setTimeout(flush, 800);
   }, [flush]);
 
   // Don't lose the last move if the phone locks or the tab closes.
@@ -246,7 +251,7 @@ export default function GameApp({ token }: { token: string }) {
   return (
     <Frame>
       <TopBar save={save} saveState={saveState} />
-      <nav className="grid grid-cols-6 gap-px bg-slate-600 border-y border-slate-500 text-[11px] font-bold">
+      {!save.live && <nav className="grid grid-cols-6 gap-px bg-slate-600 border-y border-slate-500 text-[11px] font-bold">
         {(['home', 'squad', 'tactics', 'fixtures', 'table', 'cup'] as Tab[]).map((t) => (
           <button
             key={t}
@@ -256,7 +261,7 @@ export default function GameApp({ token }: { token: string }) {
             {t === 'home' ? 'Inbox' : t}
           </button>
         ))}
-      </nav>
+      </nav>}
 
       {saveState === 'error' && (
         <p className="m-2 text-[11px] bg-red-900/60 border border-red-700 p-2 flex items-center justify-between gap-2">
@@ -266,15 +271,26 @@ export default function GameApp({ token }: { token: string }) {
       )}
 
       <div className="p-2 space-y-2">
-        {session ? (
+        {save.live ? (
+          <LiveScreen
+            save={save}
+            update={update}
+            onFinished={() => {
+              const lm = save.live!;
+              update((s) => { completeLive(s); });
+              setShowMatch({ w: lm.w, which: lm.kind === 'cup' ? 'cup' : 'match' });
+              setTab('home');
+            }}
+          />
+        ) : session ? (
           <Training
             save={save}
             w={w}
             day={session}
             plan={data.plan}
             library={data.library}
-            onFinish={(qs, picks, focus) => {
-              update((s) => { weekState(s, w)[session] = runSession(s, data.plan, qs, picks, focus); });
+            onFinish={(drills) => {
+              update((s) => { weekState(s, w)[session] = runSession(s, drills); });
             }}
             onClose={() => setSession(null)}
           />
@@ -286,10 +302,18 @@ export default function GameApp({ token }: { token: string }) {
             w={w}
             plan={data.plan}
             news={news}
+            library={data.library}
             onTrain={setSession}
-            onPlay={() => {
-              update((s) => { playWeek(s, w, false); });
-              setShowMatch({ w, which: 'match' });
+            onPlay={(kind) => {
+              update((s) => {
+                if (kind === 'league') {
+                  const fx = s.schedule.find((f) => f.w === w);
+                  if (fx) startLive(s, 'league', w, fx.opp, fx.home);
+                } else {
+                  const tie = ourCupTie(s, w);
+                  if (tie) startLive(s, 'cup', w, tie.a === s.team ? tie.b : tie.a, tie.a === s.team);
+                }
+              });
             }}
             onShowMatch={(which, wk) => setShowMatch({ w: wk, which })}
             onNextWeek={() => { setNews([]); update((s) => { nextWeek(s); }); }}
@@ -303,7 +327,7 @@ export default function GameApp({ token }: { token: string }) {
             }}
           />
         ) : tab === 'squad' ? (
-          <Squad save={save} w={w} />
+          <Squad save={save} w={w} update={update} />
         ) : tab === 'tactics' ? (
           <Tactics save={save} update={update} locked={!!save.log[w]?.match && !seasonOver(save)} />
         ) : tab === 'fixtures' ? (
@@ -406,8 +430,8 @@ function Intro({ team, division, squad, manager, hasOld, onStart }: {
         <div className="text-sm space-y-2">
           <p>Welcome, <b>{manager}</b>. You’re the manager of <b>Wayside {team}</b> in the DDSL <b>{division} Boys Sunday</b> league.</p>
           <p>All {squad} players start at exactly the same level. The only way to make them better is training.</p>
-          <p><b>Tuesday and Thursday:</b> run the drills you did at real training. Remember them right and your players improve more.</p>
-          <p><b>Sunday:</b> pick your team and play the match. Win the league. Win the cup.</p>
+          <p><b>Tuesday and Thursday:</b> pick the drills. Each drill makes your players better at what it trains. Give each player their own focus too.</p>
+          <p><b>Sunday:</b> pick your team, then watch the match live. Make subs, change tactics, give the half-time team talk. Win the league. Win the cup.</p>
           <p className="text-slate-300 text-xs">Play as many weeks as you like. Skip training and your players don’t improve that week.</p>
         </div>
       </Panel>
@@ -428,9 +452,9 @@ function Intro({ team, division, squad, manager, hasOld, onStart }: {
 
 // ---------- home / inbox ----------
 
-function Home({ save, w, plan, news, manager, onTrain, onPlay, onShowMatch, onNextWeek, onNewSeason, onSignOut }: {
-  save: Save; w: number; plan: PlanDrill[]; news: string[]; manager: string;
-  onTrain: (d: Day) => void; onPlay: () => void; onShowMatch: (which: 'match' | 'cup', w: number) => void;
+function Home({ save, w, library, news, manager, onTrain, onPlay, onShowMatch, onNextWeek, onNewSeason, onSignOut }: {
+  save: Save; w: number; plan: PlanDrill[]; library: LibDrill[]; news: string[]; manager: string;
+  onTrain: (d: Day) => void; onPlay: (kind: 'league' | 'cup') => void; onShowMatch: (which: 'match' | 'cup', w: number) => void;
   onNextWeek: () => void; onNewSeason: () => void; onSignOut: () => void;
 }) {
   const footer = (
@@ -466,17 +490,17 @@ function Home({ save, w, plan, news, manager, onTrain, onPlay, onShowMatch, onNe
   const fx = save.schedule.find((f) => f.w === w);
   const cupK = cupRoundIn(save, w);
   const cupTie = cupK >= 0 && !save.cup.out ? save.cup.rounds[cupK].ties.find((t) => t.a === save.team || t.b === save.team) : undefined;
+  const cupToPlay = ourCupTie(save, w);
   const last = [...save.schedule].reverse().find((f) => f.w < w && save.log[f.w]?.match);
 
   const sessionRow = (day: Day) => {
     const res = ws[day];
     const date = dayOf[day](save, w);
-    const drills = plan.filter((d) => d.day === day).length;
     let status: React.ReactNode;
-    if (res?.status === 'done') status = <span className="text-lime-300">Done · {res.answers.filter((a) => a.correct).length}/{res.answers.length} remembered</span>;
+    if (res?.status === 'done') status = <span className="text-lime-300">Done ✓</span>;
     else if (res?.status === 'missed') status = <span className="text-red-400">Missed</span>;
     else if (ws.match) status = <span className="text-red-400">Missed</span>;
-    else if (!drills) status = <span className="text-slate-400">No drills planned yet</span>;
+    else if (!library.length) status = <span className="text-slate-400">No drills yet</span>;
     else status = <Btn onClick={() => onTrain(day)}>Train</Btn>;
     return (
       <div className="flex items-center justify-between py-1.5 border-b border-slate-600 last:border-0">
@@ -523,11 +547,15 @@ function Home({ save, w, plan, news, manager, onTrain, onPlay, onShowMatch, onNe
                 <span className="text-xs text-slate-300">
                   {trained < 2 ? `Only ${trained} of 2 trainings done — untrained weeks don’t improve anyone.` : 'Check your team in Tactics first.'}
                 </span>
-                <Btn onClick={onPlay}>Play match</Btn>
+                <Btn onClick={() => onPlay('league')}>Play match</Btn>
               </>
             )}
           </div>
-          {ws.match && <div className="flex justify-end mt-2"><Btn onClick={onNextWeek}>Next week ▶</Btn></div>}
+          {ws.match && (
+            <div className="flex justify-end mt-2">
+              {cupToPlay ? <Btn onClick={() => onPlay('cup')}>Play cup tie</Btn> : <Btn onClick={onNextWeek}>Next week ▶</Btn>}
+            </div>
+          )}
         </Panel>
       )}
 
@@ -568,118 +596,75 @@ function MiniTable({ save }: { save: Save }) {
 
 function Training({ save, w, day, plan, library, onFinish, onClose }: {
   save: Save; w: number; day: Day; plan: PlanDrill[]; library: LibDrill[];
-  onFinish: (qs: Question[], picks: number[], focus: string[]) => void; onClose: () => void;
+  onFinish: (drills: LibDrill[]) => void; onClose: () => void;
 }) {
-  const qs: Question[] = useMemo(() => questionsFor(save, w, day, plan, library), [save.seed, w, day, plan, library]); // eslint-disable-line react-hooks/exhaustive-deps
   const done = save.log[w]?.[day];
-  const [focus, setFocus] = useState<string[]>([]);
-  const [step, setStep] = useState<'focus' | number | 'report'>(done ? 'report' : 'focus');
-  const [picks, setPicks] = useState<number[]>([]);
-  const [picked, setPicked] = useState<number | null>(null);
-  const players = Object.values(save.players).sort((a, b) => a.name.localeCompare(b.name));
+  const [picked, setPicked] = useState<string[]>([]);
+  const inPlan = new Set(plan.filter((d) => d.day === day).map((d) => d.drill_id));
+  const last = new Set(save.lastDrills || []);
 
-  if (step === 'report' || done) {
-    const res = done;
-    if (!res) return null;
+  if (done) {
     return (
       <Panel title={`${DAY_NAME[day]} training report`}>
         <div className="space-y-2 text-sm">
-          <p>
-            Remembered <b>{res.answers.filter((a) => a.correct).length} of {res.answers.length}</b> drills.
-            {res.focus.length > 0 && <> Extra coaching: <b>{res.focus.map((id) => save.players[id]?.name).filter(Boolean).join(' & ')}</b>.</>}
-          </p>
           <ul className="space-y-1">
-            {res.answers.map((a) => (
-              <li key={a.drillId} className="text-xs border border-slate-600 p-1.5">
-                <span className={a.correct ? 'text-lime-300' : 'text-red-400'}>{a.correct ? '✓' : '✗'}</span> <b>{a.title}</b>{' '}
-                <span className="text-slate-400">· {PHASE_LABEL[a.phase] || a.phase} · trains {(PHASE_STATS[a.phase] || []).map((k) => STATS.find((x) => x.key === k)?.label).join(', ')}</span>
-                {!a.correct && <p className="text-slate-300 mt-0.5">{a.prompt} Answer: <b>{a.right}</b></p>}
+            {(done.drills || done.answers.map((a) => ({ drillId: a.drillId, title: a.title, phase: a.phase, repeat: false }))).map((d) => (
+              <li key={d.drillId} className="text-xs border border-slate-600 p-1.5">
+                <b>{d.title}</b> <span className="text-slate-400">· trains {(PHASE_STATS[d.phase] || []).map((k) => STATS.find((x) => x.key === k)?.label).join(', ')}</span>
+                {d.repeat && <span className="text-amber-200"> · same as last session, less effect</span>}
               </li>
             ))}
           </ul>
-          <GainsTable save={save} res={res} />
+          <GainsTable save={save} res={done} />
           <div className="flex justify-end"><Btn onClick={onClose}>Continue</Btn></div>
         </div>
       </Panel>
     );
   }
 
-  if (step === 'focus') {
-    return (
-      <Panel title={`${DAY_NAME[day]} training · extra coaching`}>
-        <p className="text-sm mb-2">Pick 2 players to give extra coaching. They improve twice as much today.</p>
-        <div className="grid grid-cols-2 gap-1">
-          {players.map((p) => {
-            const on = focus.includes(p.id);
-            return (
-              <button
-                key={p.id}
-                onClick={() => setFocus(on ? focus.filter((x) => x !== p.id) : focus.length < 2 ? [...focus, p.id] : [focus[1], p.id])}
-                className={`text-left text-sm px-2 py-1.5 border ${on ? 'bg-amber-300 text-slate-900 border-amber-200 font-bold' : 'bg-slate-800 border-slate-600'}`}
-              >
-                {p.name}
-              </button>
-            );
-          })}
-        </div>
-        <div className="flex justify-between mt-2">
-          <Btn tone="plain" onClick={onClose}>Back</Btn>
-          <Btn disabled={focus.length !== 2} onClick={() => setStep(0)}>Start training</Btn>
-        </div>
-      </Panel>
-    );
-  }
+  const groups = Object.keys(PHASE_LABEL)
+    .map((ph) => ({ ph, drills: library.filter((d) => d.game_phase === ph).sort((a, b) => a.title.localeCompare(b.title)) }))
+    .filter((g) => g.drills.length);
+  const toggle = (id: string) =>
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length < DRILLS_PER_SESSION ? [...p, id] : p));
 
-  const i = step;
-  const q = qs[i];
-  const d = plan.find((x) => x.drill_id === q.drillId)!;
-  const answered = picked !== null;
   return (
-    <Panel title={`${DAY_NAME[day]} training · drill ${i + 1} of ${qs.length}`}>
-      <p className="text-sm font-bold mb-2">{q.prompt}</p>
-      <div className="space-y-1">
-        {q.options.map((o, k) => {
-          const cls = !answered
-            ? 'bg-slate-800 border-slate-600'
-            : k === q.answer
-              ? 'bg-lime-700 border-lime-400'
-              : k === picked
-                ? 'bg-red-800 border-red-500'
-                : 'bg-slate-800 border-slate-700 text-slate-400';
-          return (
-            <button key={k} disabled={answered} onClick={() => setPicked(k)} className={`w-full text-left text-sm px-2 py-2 border ${cls}`}>
-              {o}
-            </button>
-          );
-        })}
-      </div>
-      {answered && (
-        <div className="mt-2 border border-slate-600 p-2 flex gap-2 items-start">
-          {d.thumbnail_url && <img src={d.thumbnail_url} alt="" className="w-20 h-14 object-cover border border-slate-500" />}
-          <div className="text-xs">
-            <p className={picked === q.answer ? 'text-lime-300 font-bold' : 'text-red-400 font-bold'}>
-              {picked === q.answer ? 'Well remembered! Full training boost.' : 'Not quite. Small boost this time.'}
+    <Panel title={`${DAY_NAME[day]} training · pick ${DRILLS_PER_SESSION} drills`} right={<span>{picked.length}/{DRILLS_PER_SESSION}</span>}>
+      <p className="text-xs text-slate-300 mb-2">
+        Each drill makes the whole squad better at what it trains. Players also work on their own focus (set it in Squad).
+      </p>
+      <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+        {groups.map((g) => (
+          <div key={g.ph}>
+            <p className="text-[11px] font-bold text-amber-200">
+              {PHASE_LABEL[g.ph]} <span className="font-normal text-slate-400">· {(PHASE_STATS[g.ph] || []).map((k) => STATS.find((x) => x.key === k)?.short).join(' ')}</span>
             </p>
-            <p className="mt-0.5"><b>{d.title}</b> · {PHASE_LABEL[d.game_phase] || d.game_phase}</p>
-            <p className="text-slate-300">Trains {(PHASE_STATS[d.game_phase] || []).map((k) => STATS.find((x) => x.key === k)?.label).join(', ')}</p>
+            <div className="space-y-1 mt-0.5">
+              {g.drills.map((d) => {
+                const on = picked.includes(d.drill_id);
+                return (
+                  <button
+                    key={d.drill_id}
+                    onClick={() => toggle(d.drill_id)}
+                    className={`w-full text-left text-sm px-2 py-1.5 border ${on ? 'bg-amber-300 text-slate-900 border-amber-200 font-bold' : 'bg-slate-800 border-slate-600'}`}
+                  >
+                    {d.title}
+                    {inPlan.has(d.drill_id) && <span className={`text-[10px] ml-1 ${on ? 'text-slate-700' : 'text-sky-300'}`}>· real training this week</span>}
+                    {last.has(d.drill_id) && <span className={`text-[10px] ml-1 ${on ? 'text-slate-700' : 'text-amber-200'}`}>· did last time</span>}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
-      <div className="flex justify-end mt-2">
+        ))}
+      </div>
+      <div className="flex justify-between mt-2">
+        <Btn tone="plain" onClick={onClose}>Back</Btn>
         <Btn
-          disabled={!answered}
-          onClick={() => {
-            const all = [...picks, picked!];
-            setPicks(all);
-            setPicked(null);
-            if (i + 1 < qs.length) setStep(i + 1);
-            else {
-              onFinish(qs, all, focus);
-              setStep('report');
-            }
-          }}
+          disabled={picked.length !== DRILLS_PER_SESSION}
+          onClick={() => onFinish(picked.map((id) => library.find((d) => d.drill_id === id)!))}
         >
-          {i + 1 < qs.length ? 'Next drill' : 'Finish training'}
+          Run training
         </Btn>
       </div>
     </Panel>
@@ -722,42 +707,63 @@ function GainsTable({ save, res }: { save: Save; res: SessionResult }) {
 
 // ---------- squad ----------
 
-function Squad({ save, w }: { save: Save; w: number }) {
+function Squad({ save, w, update }: { save: Save; w: number; update: (fn: (s: Save) => void) => void }) {
   const players = Object.values(save.players).sort((a, b) => a.name.localeCompare(b.name));
   const weekGains = (id: string, k: StatKey) =>
     (['tuesday', 'thursday'] as Day[]).reduce((a, d) => a + (save.log[w]?.[d]?.gains[id]?.[k] || 0), 0);
   return (
-    <Panel title="Squad" right={<span className="text-[10px]">1–20 · everyone started at 5</span>}>
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-slate-300">
-              <th className="text-left font-normal">Name</th>
-              <th className="font-normal">Pos</th>
-              {STATS.map((s) => <th key={s.key} className="font-normal" title={s.label}>{s.short}</th>)}
-              <th className="font-normal">Gls</th>
-            </tr>
-          </thead>
-          <tbody>
-            {players.map((p) => (
-              <tr key={p.id} className="odd:bg-slate-800/50">
-                <td className="py-1 pr-1 font-bold">{p.name}</td>
-                <td className="text-center text-slate-300 uppercase">{p.positions[0] || '–'}</td>
-                {STATS.map((s) => (
-                  <td key={s.key} className={`text-center tabular-nums ${statClass(p.s[s.key])}`}>
-                    {Math.floor(p.s[s.key])}{weekGains(p.id, s.key) > 0 && <span className="text-lime-300 text-[9px]">▲</span>}
-                  </td>
-                ))}
-                <td className="text-center tabular-nums">{p.goals}</td>
+    <>
+      <Panel title="Squad" right={<span className="text-[10px]">1–20 · everyone started at 5</span>}>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-slate-300">
+                <th className="text-left font-normal">Name</th>
+                <th className="font-normal">Pos</th>
+                {STATS.map((s) => <th key={s.key} className="font-normal" title={s.label}>{s.short}</th>)}
+                <th className="font-normal">Gls</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="text-[10px] text-slate-400 mt-2">
-        {STATS.map((s) => `${s.short} ${s.label}`).join(' · ')}. ▲ = trained up this week.
-      </p>
-    </Panel>
+            </thead>
+            <tbody>
+              {players.map((p) => (
+                <tr key={p.id} className="odd:bg-slate-800/50">
+                  <td className="py-1 pr-1 font-bold">{p.name}</td>
+                  <td className="text-center text-slate-300 uppercase">{p.positions[0] || '–'}</td>
+                  {STATS.map((s) => (
+                    <td key={s.key} className={`text-center tabular-nums ${statClass(p.s[s.key])} ${p.focus === s.key ? 'underline decoration-sky-400 decoration-2 underline-offset-2' : ''}`}>
+                      {Math.floor(p.s[s.key])}{weekGains(p.id, s.key) > 0 && <span className="text-lime-300 text-[9px]">▲</span>}
+                    </td>
+                  ))}
+                  <td className="text-center tabular-nums">{p.goals}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="text-[10px] text-slate-400 mt-2">
+          {STATS.map((s) => `${s.short} ${s.label}`).join(' · ')}. ▲ = trained up this week. <span className="underline decoration-sky-400 decoration-2">Underlined</span> = individual focus.
+        </p>
+      </Panel>
+      <Panel title="Individual training">
+        <p className="text-xs text-slate-300 mb-2">Give each player something to work on. It gets a little extra at every training session.</p>
+        <div className="space-y-1">
+          {players.map((p) => (
+            <label key={p.id} className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-bold">{p.name} <span className="text-slate-400 font-normal uppercase text-xs">{p.positions[0] || ''}</span></span>
+              <select
+                aria-label={`Individual focus for ${p.name}`}
+                value={p.focus || ''}
+                onChange={(e) => update((s) => { const v = e.target.value as StatKey | ''; if (v) s.players[p.id].focus = v; else delete s.players[p.id].focus; })}
+                className="text-xs px-1 py-1 bg-slate-900 border border-slate-500 text-slate-100 w-36"
+              >
+                <option value="">— none —</option>
+                {STATS.map((st) => <option key={st.key} value={st.key}>{st.label}</option>)}
+              </select>
+            </label>
+          ))}
+        </div>
+      </Panel>
+    </>
   );
 }
 
@@ -783,6 +789,17 @@ function Tactics({ save, update, locked }: { save: Save; update: (fn: (s: Save) 
   return (
     <Panel title="Tactics · 7-a-side" right={<button className="underline" onClick={() => update((s) => { s.lineup = autoLineup(s); })}>Pick for me</button>}>
       {locked && <p className="text-[11px] text-slate-300 mb-2">This week’s match is played. Changes count from next Sunday.</p>}
+      <div className="grid grid-cols-3 gap-px bg-slate-600 border border-slate-500 text-xs font-bold mb-2">
+        {TACTICS.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => update((s) => { s.tactic = t.id; })}
+            className={`py-1.5 ${(save.tactic || 'balanced') === t.id ? 'bg-amber-300 text-slate-900' : 'bg-slate-800 text-slate-200'}`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
       <div className="bg-gradient-to-b from-green-800 to-green-700 border border-green-500 p-2 space-y-3">
         {rows.map((r, i) => (
           <div key={i} className="flex justify-center gap-2">
@@ -812,7 +829,7 @@ function Tactics({ save, update, locked }: { save: Save; update: (fn: (s: Save) 
         ))}
       </div>
       <p className="text-[11px] text-slate-300 mt-2">
-        Picking someone already in the team swaps them. Players out of their usual position play a bit worse. Your keeper’s <b>GK</b> number matters most in goal.
+        <b>Attack</b> scores more but lets in more; <b>Defend</b> the opposite. You can change it during the match too. Picking someone already in the team swaps them. Players out of their usual position play a bit worse. Your keeper’s <b>GK</b> number matters most in goal.
       </p>
       <p className="text-[11px] text-slate-400 mt-1">Subs: {players.filter((p) => !inTeam.has(p.id)).map((p) => p.name).join(', ') || 'none'}</p>
     </Panel>
@@ -1118,5 +1135,157 @@ function Leaderboard({ supabase, token, team }: { supabase: SupabaseClient; toke
       )}
       <p className="text-[10px] text-slate-400 mt-2">Ranked by league titles, then cups, then season, then points. Pos = league position this season.</p>
     </Panel>
+  );
+}
+
+// ---------- watching the match ----------
+
+const SPEEDS = [
+  { label: 'Slow', ms: 1400 },
+  { label: 'Normal', ms: 600 },
+  { label: 'Fast', ms: 150 },
+];
+
+function LiveScreen({ save, update, onFinished }: { save: Save; update: (fn: (s: Save) => void) => void; onFinished: () => void }) {
+  const lm = save.live as LiveMatch;
+  const [speed, setSpeed] = useState(1);
+  const [paused, setPaused] = useState(lm.minute === 0);
+  const [subSlot, setSubSlot] = useState<Slot | null>(null);
+  const atHalf = lm.minute === HALF && !lm.talk;
+
+  useEffect(() => {
+    if (paused || lm.done || atHalf || subSlot) return;
+    const t = setTimeout(() => update((s) => { if (s.live) stepLive(s, s.live); }), SPEEDS[speed].ms);
+    return () => clearTimeout(t);
+  }, [paused, lm.done, lm.minute, atHalf, subSlot, speed, update]);
+
+  const them = shortName(lm.opp);
+  const [homeName, awayName] = lm.home ? [save.team, them] : [them, save.team];
+  const [hg, ag] = lm.home ? [lm.gf, lm.ga] : [lm.ga, lm.gf];
+  const bench = Object.values(save.players).filter((p) => !Object.values(lm.onPitch).includes(p.id)).sort((a, b) => (lm.energy[b.id] || 0) - (lm.energy[a.id] || 0));
+  const feed = lm.events.slice().reverse();
+  const { possUs } = rates(save, lm);
+  const clock = lm.minute <= HALF ? `${lm.minute}′` : `${lm.minute}′`;
+  const title = lm.kind === 'cup' ? save.cup.rounds.find((r) => r.w === lm.w)?.name || 'Cup' : 'League';
+
+  return (
+    <div className="space-y-2">
+      <div className="bg-slate-900 border border-slate-500">
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center text-center py-2">
+          <span className="font-bold text-sm">{homeName}</span>
+          <span className="text-3xl font-bold tabular-nums px-3 text-amber-300">{hg} – {ag}</span>
+          <span className="font-bold text-sm">{awayName}</span>
+        </div>
+        <div className="flex justify-between px-2 pb-1 text-[11px] text-slate-300">
+          <span>{title}</span>
+          <span className="font-bold text-slate-100 tabular-nums">{lm.done ? 'FT' : atHalf ? 'HT' : clock}</span>
+          <span>{TACTICS.find((t) => t.id === lm.tactic)?.label}</span>
+        </div>
+        <div className="h-1 bg-slate-700"><div className="h-1 bg-amber-300" style={{ width: `${(lm.minute / FULL) * 100}%` }} /></div>
+      </div>
+
+      {atHalf && (
+        <Panel title="Half-time team talk">
+          <p className="text-sm mb-2">{lm.gf > lm.ga ? 'You’re winning.' : lm.gf < lm.ga ? 'You’re losing.' : 'It’s level.'} What do you say to the players?</p>
+          <div className="space-y-1">
+            {TALKS.map((t) => (
+              <button key={t.id} onClick={() => update((s) => { if (s.live) teamTalk(s, s.live, t.id); })} className="w-full text-left text-sm px-2 py-2 border bg-slate-800 border-slate-600">
+                “{t.label}”
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-400 mt-2">You can also make subs or change tactics below before the second half.</p>
+        </Panel>
+      )}
+
+      <Panel title="Commentary">
+        <ul className="space-y-1 max-h-56 overflow-y-auto text-xs">
+          {feed.map((e, i) => (
+            <li
+              key={feed.length - i}
+              className={e.kind === 'goal' ? (e.side === 'us' ? 'text-lime-300 font-bold text-sm' : 'text-red-300 font-bold text-sm') : e.kind === 'whistle' ? 'text-amber-200 font-bold' : e.kind === 'sub' || e.kind === 'talk' ? 'text-sky-300' : 'text-slate-200'}
+            >
+              <span className="text-slate-400 tabular-nums mr-1">{e.m}′</span>{e.text}
+            </li>
+          ))}
+        </ul>
+      </Panel>
+
+      {lm.done ? (
+        <div className="flex justify-end"><Btn onClick={onFinished}>Match report</Btn></div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-1">
+            <Btn tone={paused ? 'go' : 'plain'} onClick={() => setPaused(!paused)} disabled={atHalf}>{paused ? (lm.minute === 0 ? 'Kick off' : 'Play') : 'Pause'}</Btn>
+            <div className="grid grid-cols-3 gap-px bg-slate-600 border border-slate-500 text-[11px] font-bold">
+              {SPEEDS.map((sp, i) => (
+                <button key={sp.label} onClick={() => setSpeed(i)} className={`px-2 py-1.5 ${speed === i ? 'bg-amber-300 text-slate-900' : 'bg-slate-800 text-slate-200'}`}>{sp.label}</button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-px bg-slate-600 border border-slate-500 text-xs font-bold">
+            {TACTICS.map((t) => (
+              <button key={t.id} onClick={() => update((s) => { if (s.live) setTactic(s.live, t.id as Tactic); })} className={`py-1.5 ${lm.tactic === t.id ? 'bg-amber-300 text-slate-900' : 'bg-slate-800 text-slate-200'}`}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      <Panel title="Your team" right={<span className="text-[10px]">Possession {Math.round(possUs * 100)}% · shots {lm.shots[0]}–{lm.shots[1]}</span>}>
+        <p className="text-[11px] text-slate-300 mb-1">{lm.done ? 'Energy at the final whistle.' : 'Tap a player to sub them or move them. Tired players play worse — bench players get their energy back.'}</p>
+        <div className="space-y-1">
+          {SLOTS.map(({ id: slot, short }) => {
+            const pid = lm.onPitch[slot];
+            const p = pid ? save.players[pid] : undefined;
+            const e = pid ? lm.energy[pid] || 0 : 0;
+            return (
+              <button
+                key={slot}
+                disabled={lm.done}
+                onClick={() => setSubSlot(subSlot === slot ? null : slot)}
+                className={`w-full flex items-center gap-2 text-left text-xs px-2 py-1 border ${subSlot === slot ? 'border-amber-300 bg-slate-700' : 'border-slate-600 bg-slate-800'}`}
+              >
+                <span className="w-7 font-bold text-slate-300">{short}</span>
+                <span className="flex-1 font-bold">{p?.name || '— empty —'}{p && !fits(p, slot) && <span className="text-amber-200 font-normal"> · not usual position</span>}</span>
+                <EnergyBar e={e} />
+              </button>
+            );
+          })}
+        </div>
+        {subSlot && !lm.done && (
+          <div className="mt-2 border border-amber-300 p-2">
+            <p className="text-xs font-bold mb-1">Who goes to {subSlot.toUpperCase()}?</p>
+            <div className="space-y-1">
+              {[...bench, ...SLOTS.filter((x) => x.id !== subSlot && lm.onPitch[x.id]).map((x) => save.players[lm.onPitch[x.id]!])].filter(Boolean).map((p) => {
+                const onPitch = Object.values(lm.onPitch).includes(p.id);
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => { update((s) => { if (s.live) subLive(s, s.live, subSlot, p.id); }); setSubSlot(null); }}
+                    className="w-full flex items-center gap-2 text-left text-xs px-2 py-1 border border-slate-600 bg-slate-900"
+                  >
+                    <span className="flex-1">{onPitch ? '↔ ' : '⬆ '}<b>{p.name}</b> <span className="text-slate-400 uppercase">{p.positions[0] || ''}</span>{onPitch && <span className="text-slate-400"> (swap)</span>}</span>
+                    <EnergyBar e={lm.energy[p.id] || 0} />
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex justify-end mt-1"><Btn tone="plain" onClick={() => setSubSlot(null)}>Cancel</Btn></div>
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function EnergyBar({ e }: { e: number }) {
+  const c = e > 70 ? 'bg-lime-400' : e > 45 ? 'bg-amber-300' : 'bg-red-400';
+  return (
+    <span className="flex items-center gap-1 w-20">
+      <span className="flex-1 h-1.5 bg-slate-700"><span className={`block h-1.5 ${c}`} style={{ width: `${Math.round(e)}%` }} /></span>
+      <span className="tabular-nums text-[10px] text-slate-400 w-6 text-right">{Math.round(e)}</span>
+    </span>
   );
 }

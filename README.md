@@ -53,7 +53,10 @@ Database changes live in `supabase/migrations/002_age_groups.sql` (run once in t
 
 ## U10 Manager game (kids, no login)
 
-A Championship Manager 99/00-style game for the U10 Sunday teams. Each team has a secret game link: coaches see **Copy link** under the team name in U10 → Squads and drop it into the team WhatsApp. Kids open it on their own phone; their save stays in that phone's browser.
+A Championship Manager 99/00-style game for the U10 Sunday teams. Each team has a secret game link: coaches see **Copy link** under the team name in U10 → Squads and drop it into the team WhatsApp.
+
+- **Logins.** The link asks for a login: a parent's email, a password and a manager nickname (not the kid's real name). One saved game per login, on the team whose link they used; it's saved to the server, so it works on any phone. No emails are sent ("Confirm email" is off in Supabase), so a forgotten password means a new login. Parent logins get no coach access. A game started on a phone before logins existed is offered once ("Keep my game") and moved to the login.
+- **Leaderboard.** Table tab → *Wayside 10.x managers*: nicknames ranked by league titles, cups, season, points.
 
 - **Everyone starts equal.** Every stat (Passing, Dribbling, Shooting, Tackling, Positioning, Keeping, Fitness) starts at 5 out of 20.
 - **Training = remembering real training.** On Tuesday and Thursday the game runs the drills in the U10 Tuesday/Thursday plan. Each drill asks one question (which drill did we do, what is it working on, what kit do you need). Right answer = full boost to the stats that drill trains; wrong = small boost and the answer is shown. Kids pick 2 players for extra coaching (double boost).
@@ -61,7 +64,7 @@ A Championship Manager 99/00-style game for the U10 Sunday teams. Each team has 
 - **DDSL.** Teams named `10.2`, `10.11`, `10.19` play their real DDSL Sunday division (teams + real fixture dates, snapshot in `src/lib/game/ddsl.ts`). DDSL publishes no U10 results, tables or cup, so results are simulated and the cup is a made-up 16-team knockout of the clubs in those divisions. Other team names see "not in the game yet".
 - Rules and balance live in `src/lib/game/engine.ts` (no UI), the screens in `src/components/game/GameApp.tsx`.
 
-Database: `supabase/migrations/011_manager_game.sql` adds `teams.game_token` and the `game_team(token)` function (first names + positions for that one U10 team, plus the U10 Tue/Thu plan). Run it before merging.
+Database: `012_game_saves.sql` adds `game_saves` (one row per login, own-row RLS, column-limited updates) and `game_join` / `game_mine` / `game_leaderboard`. `supabase/migrations/011_manager_game.sql` adds `teams.game_token` and the `game_team(token)` function (first names + positions for that one U10 team, plus the U10 Tue/Thu plan). Run it before merging.
 
 ## Match Day (coaches only)
 

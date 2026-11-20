@@ -158,6 +158,8 @@ export interface Save {
   oppBoost: number;
   /** The game week being played. Moves on when the kid taps Next week after the match. */
   cur?: number;
+  /** Finished seasons, for the leaderboard (league titles, cups). */
+  honours?: { season: number; pos: number; cup: boolean }[];
 }
 
 // ---------- Random (seeded, so a reload never re-rolls) ----------
@@ -472,6 +474,9 @@ export function newSave(opts: { team: string; division: string; today: string; p
     cup: { rounds: [], out: false, won: false },
     oppBoost: opts.carry ? opts.carry.oppBoost + 2 : 0,
     cur: 0,
+    honours: opts.carry
+      ? [...(opts.carry.honours || []), { season: opts.carry.season, pos: table(opts.carry).findIndex((r) => r.team === opts.carry!.team) + 1, cup: opts.carry.cup.won }]
+      : [],
   };
   for (const p of opts.players) {
     const old = opts.carry?.players[p.id];
@@ -658,4 +663,22 @@ export function playWeek(s: Save, w: number, auto: boolean) {
 
 export function seasonOver(s: Save) {
   return s.schedule.every((f) => s.log[f.w]?.match);
+}
+
+/** What the team leaderboard shows for this save. */
+export function summary(s: Save) {
+  const t = table(s);
+  const i = t.findIndex((r) => r.team === s.team);
+  const me = t[i];
+  const done = seasonOver(s);
+  const past = s.honours || [];
+  return {
+    season: s.season,
+    played: me ? me.p : 0,
+    pts: me ? me.pts : 0,
+    pos: me && me.p > 0 ? i + 1 : null,
+    gd: me ? me.gf - me.ga : 0,
+    titles: past.filter((h) => h.pos === 1).length + (done && i === 0 ? 1 : 0),
+    cups: past.filter((h) => h.cup).length + (s.cup.won ? 1 : 0),
+  };
 }

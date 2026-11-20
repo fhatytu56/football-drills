@@ -57,7 +57,7 @@ A Championship Manager 99/00-style game for the U10 Sunday teams. Each team has 
 
 - **Everyone starts equal.** Every stat (Passing, Dribbling, Shooting, Tackling, Positioning, Keeping, Fitness) starts at 5 out of 20.
 - **Training = remembering real training.** On Tuesday and Thursday the game runs the drills in the U10 Tuesday/Thursday plan. Each drill asks one question (which drill did we do, what is it working on, what kit do you need). Right answer = full boost to the stats that drill trains; wrong = small boost and the answer is shown. Kids pick 2 players for extra coaching (double boost).
-- **Real weeks.** Tuesday's session opens on Tuesday, Thursday's on Thursday, the match on Sunday. Weeks that go by are played automatically with no training. Coaches can try later weeks with `?today=2027-01-10` on the link.
+- **Own pace.** Each week is Tuesday training, Thursday training, then the Sunday match; **Next week ▶** moves on. Kids can play as many weeks as they like. Skipping training means nobody improves that week. The season starts in the real week the kid starts, so real DDSL fixture dates line up.
 - **DDSL.** Teams named `10.2`, `10.11`, `10.19` play their real DDSL Sunday division (teams + real fixture dates, snapshot in `src/lib/game/ddsl.ts`). DDSL publishes no U10 results, tables or cup, so results are simulated and the cup is a made-up 16-team knockout of the clubs in those divisions. Other team names see "not in the game yet".
 - Rules and balance live in `src/lib/game/engine.ts` (no UI), the screens in `src/components/game/GameApp.tsx`.
 

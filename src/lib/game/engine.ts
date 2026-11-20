@@ -156,6 +156,8 @@ export interface Save {
   log: Record<number, WeekState>;
   cup: { rounds: CupRound[]; out: boolean; won: boolean };
   oppBoost: number;
+  /** The game week being played. Moves on when the kid taps Next week after the match. */
+  cur?: number;
 }
 
 // ---------- Random (seeded, so a reload never re-rolls) ----------
@@ -220,9 +222,17 @@ export const dayOf = {
   sunday: (s: Save, w: number) => addDays(s.startMonday, w * 7 + 6),
 };
 
-/** Which game week today is in (can be past the end of the season). */
-export function weekOf(s: Save, today: string) {
-  return Math.floor(daysBetween(s.startMonday, today) / 7);
+/** The week being played. Older saves without `cur` pick up at the first week with no match. */
+export function currentWeek(s: Save) {
+  if (typeof s.cur === 'number') return Math.min(s.cur, s.weeks - 1);
+  const w = s.schedule.findIndex((f) => !s.log[f.w]?.match);
+  return w < 0 ? s.weeks - 1 : w;
+}
+
+/** After the match: on to next week. */
+export function nextWeek(s: Save) {
+  const w = currentWeek(s);
+  if (s.log[w]?.match && w + 1 < s.weeks) s.cur = w + 1;
 }
 
 // ---------- Team strength ----------
@@ -461,6 +471,7 @@ export function newSave(opts: { team: string; division: string; today: string; p
     log: {},
     cup: { rounds: [], out: false, won: false },
     oppBoost: opts.carry ? opts.carry.oppBoost + 2 : 0,
+    cur: 0,
   };
   for (const p of opts.players) {
     const old = opts.carry?.players[p.id];
@@ -643,16 +654,6 @@ export function playWeek(s: Save, w: number, auto: boolean) {
   const cup = playCupRound(s, w, auto);
   if (cup) { ws.cup = cup; credit(s, cup); }
   return ws;
-}
-
-/** Catch up: any week that has fully gone by gets played automatically (missed training = no gains). */
-export function catchUp(s: Save, today: string) {
-  const now = weekOf(s, today);
-  const played: number[] = [];
-  for (let w = 0; w < Math.min(now, s.weeks); w++) {
-    if (!weekState(s, w).match) { playWeek(s, w, true); played.push(w); }
-  }
-  return played;
 }
 
 export function seasonOver(s: Save) {

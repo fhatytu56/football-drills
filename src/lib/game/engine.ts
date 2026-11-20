@@ -2,6 +2,7 @@
 // so it can be checked with a script.
 
 import { DIVISIONS, WAYSIDE, fixtureDate, type Division } from './ddsl';
+import type { LiveMatch, Tactic } from './match';
 
 // ---------- Stats ----------
 
@@ -71,19 +72,15 @@ export interface GamePlayer {
   s: Stats;
   goals: number;
   apps: number;
-}
-
-export interface Question {
-  kind: 'day' | 'phase' | 'kit';
-  drillId: string;
-  prompt: string;
-  options: string[];
-  answer: number; // index into options
+  /** Individual training: this stat gets a little extra every session. */
+  focus?: StatKey;
 }
 
 export interface SessionResult {
   status: 'done' | 'missed' | 'empty';
-  focus: string[]; // player ids given extra coaching
+  drills?: { drillId: string; title: string; phase: string; repeat: boolean }[];
+  // older saves (quiz version)
+  focus: string[];
   answers: { drillId: string; title: string; phase: string; correct: boolean; picked: string; right: string; prompt: string }[];
   gains: Record<string, Partial<Stats>>; // player id -> stat increases
 }
@@ -160,6 +157,12 @@ export interface Save {
   cur?: number;
   /** Finished seasons, for the leaderboard (league titles, cups). */
   honours?: { season: number; pos: number; cup: boolean }[];
+  /** Drills from the last session (running the same ones again in a row counts for less). */
+  lastDrills?: string[];
+  /** Pre-match tactic. */
+  tactic?: Tactic;
+  /** A match being watched right now, so closing the app doesn't lose it. */
+  live?: LiveMatch;
 }
 
 // ---------- Random (seeded, so a reload never re-rolls) ----------
@@ -175,13 +178,13 @@ export function rng(seed: number) {
   };
 }
 
-function hash(s: string) {
+export function hash(s: string) {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return h >>> 0;
 }
 
-function shuffle<T>(arr: T[], r: () => number): T[] {
+export function shuffle<T>(arr: T[], r: () => number): T[] {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(r() * (i + 1));
@@ -234,7 +237,9 @@ export function currentWeek(s: Save) {
 /** After the match: on to next week. */
 export function nextWeek(s: Save) {
   const w = currentWeek(s);
-  if (s.log[w]?.match && w + 1 < s.weeks) s.cur = w + 1;
+  if (!s.log[w]?.match || ourCupTie(s, w)) return; // league game and our cup tie first
+  recordCup(s, w, null); // the rest of this week's cup round, if we weren't in it
+  if (w + 1 < s.weeks) s.cur = w + 1;
 }
 
 // ---------- Team strength ----------
@@ -272,31 +277,37 @@ export function fits(p: GamePlayer, slot: Slot) {
 
 const EMPTY: Stats = { passing: 3, dribbling: 3, shooting: 3, tackling: 3, positioning: 3, keeping: 3, fitness: 3 };
 
-export function teamStrength(s: Save, lineup: Lineup) {
+/** Energy 0–100 makes a tired player play like a weaker one (100 = full strength, 0 = 70%). */
+export function energyFactor(e: number | undefined) {
+  return e === undefined ? 1 : 0.6 + 0.4 * Math.max(0, Math.min(100, e)) / 100;
+}
+
+export function teamStrength(s: Save, lineup: Lineup, energy?: Record<string, number>) {
   let att = 0;
   let def = 0;
   let pas = 0;
   let fit = 0;
+  let keep = EMPTY.keeping;
   for (const { id: slot } of SLOTS) {
     const p = lineup[slot] ? s.players[lineup[slot]!] : undefined;
     const st = p ? p.s : EMPTY;
-    const k = p && !fits(p, slot) ? 0.85 : 1;
+    const e = p ? energyFactor(energy?.[p.id]) : 1;
+    const k = (p && !fits(p, slot) ? 0.92 : 1) * e;
     att += ATT_WEIGHT[slot] * attOf(slot, st) * k;
     def += DEF_WEIGHT[slot] * defOf(slot, st) * k;
-    pas += st.passing / 7;
+    pas += (st.passing * e) / 7;
     fit += st.fitness / 7;
+    if (slot === 'gk') keep = st.keeping * e;
   }
-  const gkP = lineup.gk ? s.players[lineup.gk] : undefined;
-  const keep = gkP ? gkP.s.keeping : EMPTY.keeping;
-  const fitK = 0.92 + 0.16 * (fit / MAX_STAT);
+  const fitK = energy ? 1 : 0.92 + 0.16 * (fit / MAX_STAT); // live matches use energy instead
   return { att: att * fitK, def: (0.65 * def + 0.35 * keep) * fitK, pas, keep };
 }
 
 // ---------- Matches ----------
 
-const GOALS = 2.6; // average goals per team when evenly matched (7-a-side, 50 min)
+export const GOALS = 2.6; // average goals per team when evenly matched (7-a-side, 50 min)
 
-function lambda(att: number, def: number, home: boolean) {
+export function lambda(att: number, def: number, home: boolean) {
   return Math.max(0.15, GOALS * Math.pow(att / Math.max(1, def), 1.3) * (home ? 1.08 : 0.95));
 }
 
@@ -524,71 +535,39 @@ export function autoLineup(s: Save): Lineup {
 export interface PlanDrill { day: string; drill_id: string; title: string; game_phase: string; equipment: string[]; thumbnail_url: string | null }
 export interface LibDrill { drill_id: string; title: string; game_phase: string; equipment: string[] }
 
-const DAY_WORD: Record<string, string> = { tuesday: 'Tuesday', thursday: 'Thursday' };
+export const DRILLS_PER_SESSION = 3;
+const GAIN = 0.32; // per stat, per drill, for the whole squad
+const INDIVIDUAL = 0.25; // per session, on each player's own focus stat
+const REPEAT = 0.6; // a drill run again straight after loses some effect
 
-/** One question per drill. Same questions every time the session is opened that week. */
-export function questionsFor(s: Save, w: number, day: 'tuesday' | 'thursday', plan: PlanDrill[], library: LibDrill[]): Question[] {
-  const drills = plan.filter((d) => d.day === day);
-  const dayTitles = new Set(drills.map((d) => d.title));
-  return drills.map((d, i) => {
-    const r = rng(s.seed + w * 131 + (day === 'tuesday' ? 1 : 2) * 17 + i);
-    const kinds: Question['kind'][] = [];
-    const otherTitles = Array.from(new Set(library.map((x) => x.title).filter((t) => !dayTitles.has(t))));
-    if (otherTitles.length >= 2) kinds.push('day');
-    kinds.push('phase');
-    const otherKit = Array.from(new Set(library.flatMap((x) => x.equipment))).filter((e) => !d.equipment.includes(e));
-    if (d.equipment.length && otherKit.length >= 2) kinds.push('kit');
-    const kind = kinds[(w + i) % kinds.length];
-
-    let prompt = '';
-    let right = '';
-    let wrong: string[] = [];
-    if (kind === 'day') {
-      prompt = `Which of these did we do on ${DAY_WORD[day]}?`;
-      right = d.title;
-      wrong = shuffle(otherTitles, r).slice(0, 2);
-    } else if (kind === 'kit') {
-      prompt = `What do you need for “${d.title}”?`;
-      right = d.equipment[Math.floor(r() * d.equipment.length)];
-      wrong = shuffle(otherKit, r).slice(0, 2);
-    } else {
-      prompt = `What is “${d.title}” mainly working on?`;
-      right = PHASE_LABEL[d.game_phase] || d.game_phase;
-      wrong = shuffle(Object.keys(PHASE_LABEL).filter((p) => p !== d.game_phase && PHASE_STATS[p][0] !== PHASE_STATS[d.game_phase]?.[0]), r)
-        .slice(0, 2)
-        .map((p) => PHASE_LABEL[p]);
-    }
-    const options = shuffle([right, ...wrong], r);
-    return { kind, drillId: d.drill_id, prompt, options, answer: options.indexOf(right) };
-  });
+/** Better players improve more slowly, like real life. */
+function grow(p: GamePlayer, key: StatKey, g: number, gains: Record<string, Partial<Stats>>) {
+  const before = p.s[key];
+  const slow = Math.max(0.3, 1 - (before - START_STAT) / 16);
+  p.s[key] = Math.min(MAX_STAT, before + g * slow);
+  const got = p.s[key] - before;
+  if (got > 0) (gains[p.id] ||= {})[key] = ((gains[p.id] || {})[key] || 0) + got;
 }
 
-const GAIN = 0.2; // per stat, per drill, for the whole squad
-const FOCUS = 2; // extra coaching doubles it
-const WRONG = 0.35; // a wrong answer still counts a bit
-
-/** Apply a finished session: stat gains for the squad, bigger for the focus players. */
-export function runSession(s: Save, plan: PlanDrill[], qs: Question[], picks: number[], focus: string[]): SessionResult {
+/** Run a session: the chosen drills train the whole squad; each player also works on their own focus. */
+export function runSession(s: Save, drills: LibDrill[]): SessionResult {
   const gains: Record<string, Partial<Stats>> = {};
-  const answers: SessionResult['answers'] = [];
-  qs.forEach((q, i) => {
-    const d = plan.find((x) => x.drill_id === q.drillId)!;
-    const correct = picks[i] === q.answer;
-    const m = s.mastery[q.drillId] || 0;
-    const mult = (correct ? 1 + 0.1 * Math.min(m, 5) : WRONG);
-    if (correct) s.mastery[q.drillId] = m + 1;
-    answers.push({ drillId: q.drillId, title: d.title, phase: d.game_phase, correct, picked: q.options[picks[i]] ?? '', right: q.options[q.answer], prompt: q.prompt });
+  const last = new Set(s.lastDrills || []);
+  for (const d of drills.slice(0, DRILLS_PER_SESSION)) {
+    const mult = last.has(d.drill_id) ? REPEAT : 1;
     for (const key of PHASE_STATS[d.game_phase] || ['fitness']) {
-      for (const p of Object.values(s.players)) {
-        const g = GAIN * mult * (focus.includes(p.id) ? FOCUS : 1);
-        const before = p.s[key];
-        p.s[key] = Math.min(MAX_STAT, before + g);
-        const got = p.s[key] - before;
-        if (got > 0) (gains[p.id] ||= {})[key] = ((gains[p.id] || {})[key] || 0) + got;
-      }
+      for (const p of Object.values(s.players)) grow(p, key, GAIN * mult, gains);
     }
-  });
-  return { status: 'done', focus, answers, gains };
+  }
+  for (const p of Object.values(s.players)) if (p.focus) grow(p, p.focus, INDIVIDUAL, gains);
+  s.lastDrills = drills.map((d) => d.drill_id);
+  return {
+    status: 'done',
+    focus: [],
+    answers: [],
+    drills: drills.map((d) => ({ drillId: d.drill_id, title: d.title, phase: d.game_phase, repeat: last.has(d.drill_id) })),
+    gains,
+  };
 }
 
 // ---------- The week ----------
@@ -601,22 +580,27 @@ export function cupRoundIn(s: Save, w: number) {
   return s.cup.rounds.findIndex((r) => r.w === w);
 }
 
-/** Our cup tie this week (if we're still in), and play everyone else's ties in that round. */
-export function playCupRound(s: Save, w: number, auto: boolean): MatchResult | null {
+/** Our unplayed cup tie this week, if it's a cup week and we're still in. */
+export function ourCupTie(s: Save, w: number): CupTie | undefined {
   const k = cupRoundIn(s, w);
-  if (k < 0) return null;
+  if (k < 0 || s.cup.out) return undefined;
   const round = s.cup.rounds[k];
-  if (!round.ties.length || round.ties.every((t) => t.winner)) return null;
+  return round.ties.find((t) => !t.winner && (t.a === s.team || t.b === s.team));
+}
+
+/** Finish a cup round: our tie from `ours` (if we played one), everyone else simulated, then the next draw. */
+export function recordCup(s: Save, w: number, ours: MatchResult | null) {
+  const k = cupRoundIn(s, w);
+  if (k < 0) return;
+  const round = s.cup.rounds[k];
+  if (!round.ties.length || round.ties.every((t) => t.winner)) return;
   const r = rng(s.seed + w * 313 + 7);
-  let ours: MatchResult | null = null;
   for (const t of round.ties) {
-    if (t.a === s.team || t.b === s.team) {
-      const opp = t.a === s.team ? t.b : t.a;
-      const m = playMatch(s, opp, t.a === s.team, w, s.seed + w * 71 + 3, auto, true);
-      ours = m;
-      t.ga = t.a === s.team ? m.gf : m.ga;
-      t.gb = t.a === s.team ? m.ga : m.gf;
-      if (m.pens) t.pens = t.a === s.team ? m.pens : [m.pens[1], m.pens[0]];
+    if (t.winner) continue;
+    if ((t.a === s.team || t.b === s.team) && ours) {
+      t.ga = t.a === s.team ? ours.gf : ours.ga;
+      t.gb = t.a === s.team ? ours.ga : ours.gf;
+      if (ours.pens) t.pens = t.a === s.team ? ours.pens : [ours.pens[1], ours.pens[0]];
     } else {
       const [ga, gb] = simPair(s, t.a, t.b, w, r);
       t.ga = ga;
@@ -635,20 +619,25 @@ export function playCupRound(s: Save, w: number, auto: boolean): MatchResult | n
   } else if (winners[0] === s.team) {
     s.cup.won = true;
   }
-  return ours;
 }
 
-function credit(s: Save, m: MatchResult) {
-  for (const id of SLOTS.map((x) => s.lineup[x.id]).filter(Boolean) as string[]) if (s.players[id]) s.players[id].apps++;
+export function credit(s: Save, m: MatchResult, played?: string[]) {
+  for (const id of played || (SLOTS.map((x) => s.lineup[x.id]).filter(Boolean) as string[])) if (s.players[id]) s.players[id].apps++;
   for (const id of m.scorers) if (s.players[id]) s.players[id].goals++;
 }
 
-/** Sunday: league game (and the cup tie, if it's a cup week). */
+/** Missed training is marked when Sunday's match starts. */
+export function closeTraining(s: Save, w: number) {
+  const ws = weekState(s, w);
+  for (const day of ['tuesday', 'thursday'] as const) if (!ws[day]) ws[day] = { status: 'missed', focus: [], answers: [], gains: {} };
+}
+
+/** Sunday without watching (used by the balance checks): league game and cup tie, instantly. */
 export function playWeek(s: Save, w: number, auto: boolean) {
   const ws = weekState(s, w);
   if (ws.match) return ws;
   if (!s.lineup || Object.keys(s.lineup).length === 0) s.lineup = autoLineup(s);
-  for (const day of ['tuesday', 'thursday'] as const) if (!ws[day]) ws[day] = { status: 'missed', focus: [], answers: [], gains: {} };
+  closeTraining(s, w);
   const fx = s.schedule.find((f) => f.w === w);
   if (fx) {
     const m = playMatch(s, fx.opp, fx.home, w, s.seed + w * 53 + 1, auto);
@@ -656,8 +645,13 @@ export function playWeek(s: Save, w: number, auto: boolean) {
     credit(s, m);
     recordLeagueWeek(s, w, m);
   }
-  const cup = playCupRound(s, w, auto);
-  if (cup) { ws.cup = cup; credit(s, cup); }
+  const tie = ourCupTie(s, w);
+  if (tie) {
+    const m = playMatch(s, tie.a === s.team ? tie.b : tie.a, tie.a === s.team, w, s.seed + w * 71 + 3, auto, true);
+    ws.cup = m;
+    credit(s, m);
+    recordCup(s, w, m);
+  } else recordCup(s, w, null);
   return ws;
 }
 

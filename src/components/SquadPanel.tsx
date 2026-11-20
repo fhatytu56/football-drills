@@ -1,13 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Pencil, Plus, Trash2, Check, X, Users } from 'lucide-react';
+import { Pencil, Plus, Trash2, Check, X, Users, Gamepad2 } from 'lucide-react';
 import { POSITIONS, teamHint, type AgeGroup, type Position } from '@/lib/groups';
 import PositionPitch from '@/components/PositionPitch';
 
 interface Team {
   id: string;
   name: string;
+  /** U10s: secret link for the kids' manager game (needs migration 011). */
+  game_token?: string;
 }
 
 interface Player {
@@ -205,6 +207,8 @@ export default function SquadPanel({ group }: { group: AgeGroup }) {
               )}
             </header>
 
+            {team?.game_token && group.id === 'u10' && <GameLinkRow team={team} />}
+
             <ul className="divide-y divide-slate-100">
               {list.map((p) =>
                 editing === p.id ? (
@@ -398,5 +402,30 @@ function PlayerEditor({
         </div>
       </form>
     </li>
+  );
+}
+
+/** U10s: the kids' manager game link for this team. Copy it into the team WhatsApp. */
+function GameLinkRow({ team }: { team: Team }) {
+  const [copied, setCopied] = useState(false);
+  const url = typeof window === 'undefined' ? '' : `${window.location.origin}/game/${team.game_token}`;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      window.prompt('Copy the game link:', url);
+    }
+  };
+  return (
+    <div className="flex items-center justify-between gap-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
+      <span className="flex items-center gap-1.5 text-xs text-slate-600">
+        <Gamepad2 className="w-4 h-4 text-emerald-700" /> Manager game link for the kids
+      </span>
+      <button onClick={copy} className="text-xs font-bold px-2.5 py-1 rounded-lg bg-emerald-700 text-white">
+        {copied ? 'Copied ✓' : 'Copy link'}
+      </button>
+    </div>
   );
 }

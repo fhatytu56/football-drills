@@ -607,6 +607,7 @@ function Training({ save, w, day, plan, library, onFinish, onClose }: {
     return (
       <Panel title={`${DAY_NAME[day]} training report`}>
         <div className="space-y-2 text-sm">
+          {done.mishap && <p className="text-xs bg-[#3a2a0b] border border-amber-700 p-2">😄 <b>Training news:</b> {done.mishap}</p>}
           <ul className="space-y-1">
             {(done.drills || done.answers.map((a) => ({ drillId: a.drillId, title: a.title, phase: a.phase, repeat: false }))).map((d) => (
               <li key={d.drillId} className="text-xs border border-slate-600 p-1.5">
@@ -1200,7 +1201,7 @@ function LiveScreen({ save, update, onFinished }: { save: Save; update: (fn: (s:
           {feed.map((e, i) => (
             <li
               key={feed.length - i}
-              className={e.kind === 'goal' ? (e.side === 'us' ? 'text-lime-300 font-bold text-sm' : 'text-red-300 font-bold text-sm') : e.kind === 'whistle' ? 'text-amber-200 font-bold' : e.kind === 'sub' || e.kind === 'talk' ? 'text-sky-300' : 'text-slate-200'}
+              className={e.kind === 'goal' ? (e.side === 'us' ? 'text-lime-300 font-bold text-sm' : 'text-red-300 font-bold text-sm') : e.kind === 'whistle' ? 'text-amber-200 font-bold' : e.kind === 'sub' || e.kind === 'talk' ? 'text-sky-300' : e.kind === 'fun' ? 'text-fuchsia-300 italic' : 'text-slate-200'}
             >
               <span className="text-slate-400 tabular-nums mr-1">{e.m}′</span>{e.text}
             </li>

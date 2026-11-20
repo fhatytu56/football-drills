@@ -4,7 +4,7 @@
 
 import { shortName } from './ddsl';
 import {
-  SLOTS, lambda, teamStrength, teamRating, credit, recordLeagueWeek, recordCup, closeTraining, weekState, hash,
+  SLOTS, lambda, teamStrength, teamRating, credit, recordLeagueWeek, recordCup, closeTraining, weekState, hash, jokePlayer,
   type Save, type Lineup, type Slot, type MatchResult,
 } from './engine';
 
@@ -23,7 +23,7 @@ export const TACTICS: { id: Tactic; label: string; att: number; def: number }[] 
 export interface LiveEvent {
   m: number;
   side: 'us' | 'them' | 'none';
-  kind: 'goal' | 'chance' | 'save' | 'miss' | 'play' | 'sub' | 'whistle' | 'talk';
+  kind: 'goal' | 'chance' | 'save' | 'miss' | 'play' | 'sub' | 'whistle' | 'talk' | 'fun';
   text: string;
 }
 
@@ -50,6 +50,12 @@ export interface LiveMatch {
   subs: number;
   pens?: [number, number];
   done: boolean;
+  /** Their coach lost the plot: their team plays at `mult` until minute `until`. */
+  rattled?: { mult: number; until: number };
+  /** Minute their coach blows up this match (0 = he behaves). Set at kick-off. */
+  coachAt?: number;
+  /** Funny moments so far this match (max 2). */
+  fun?: number;
 }
 
 // ---------- random with saved state ----------
@@ -84,7 +90,10 @@ export function startLive(s: Save, kind: 'league' | 'cup', w: number, opp: strin
     events: [],
     scorers: [], shots: [0, 0], onTarget: [0, 0], poss: [0, 0], subs: 0,
     done: false,
+    fun: 0,
   };
+  // Roughly 4 matches in 10, their coach loses it at some point.
+  lm.coachAt = rand(lm) < 0.4 ? 6 + Math.floor(rand(lm) * 40) : 0;
   const them = shortName(opp);
   lm.events.push({ m: 0, side: 'none', kind: 'whistle', text: `Kick-off! ${home ? `${s.team} v ${them}` : `${them} v ${s.team}`}.` });
   s.live = lm;
@@ -125,7 +134,8 @@ function strengths(s: Save, lm: LiveMatch) {
   const us = teamStrength(s, lm.onPitch, lm.energy);
   const tac = TACTICS.find((t) => t.id === lm.tactic)!;
   const oppTired = 1 - 0.12 * (lm.minute / FULL);
-  const them = teamRating(s, lm.opp, lm.w) * oppTired;
+  const rattled = lm.rattled && lm.minute < lm.rattled.until ? lm.rattled.mult : 1;
+  const them = teamRating(s, lm.opp, lm.w) * oppTired * rattled;
   return {
     att: us.att * tac.att * lm.morale,
     def: us.def * tac.def * lm.morale,
@@ -206,6 +216,8 @@ export function stepLive(s: Save, lm: LiveMatch) {
     } else {
       say('them', 'miss', pick(lm, [`${oppPlayer(lm, true)} shoots wide for ${them}.`, `${them} go close but it’s off target.`]));
     }
+  } else if ((lm.fun || 0) < 2 && rand(lm) < 0.03) {
+    funnyMoment(s, lm, say);
   } else if (rand(lm) < 0.35) {
     if (ours) {
       const a = ourPlayer(s, lm, 'pass');
@@ -216,6 +228,8 @@ export function stepLive(s: Save, lm: LiveMatch) {
     }
   }
 
+  if (lm.coachAt && m === lm.coachAt) coachLosesIt(lm, them, say);
+
   tire(s, lm);
 
   if (m === HALF) {
@@ -223,6 +237,50 @@ export function stepLive(s: Save, lm: LiveMatch) {
     for (const id of Object.keys(lm.energy)) lm.energy[id] = Math.min(100, lm.energy[id] + 10);
   }
   if (m === FULL) finishWhistle(s, lm);
+}
+
+// ---------- a bit of fun ----------
+
+type Say = (side: LiveEvent['side'], kind: LiveEvent['kind'], text: string) => void;
+
+const COACH = [
+  '{t}’s coach is roaring at the ref about a throw-in. The ref points him back to his box.',
+  '{t}’s coach kicks a water bottle. It lands in his own kit bag.',
+  '{t}’s coach has gone purple shouting “MAN ON!”. Nobody is on.',
+  'The ref has a word with {t}’s coach. He goes and sulks on the cooler box.',
+  '{t}’s coach throws his clipboard. It hits his own sub.',
+  '{t}’s coach is demanding a VAR check. There is no VAR. It’s the under-10s.',
+  '{t}’s coach yells “REF, ARE YOU BLIND?!”. The ref asks him to repeat it. He doesn’t.',
+];
+
+function coachLosesIt(lm: LiveMatch, them: string, say: Say) {
+  say('them', 'fun', pick(lm, COACH).replace('{t}', them));
+  if (rand(lm) < 0.7) {
+    lm.rattled = { mult: 0.88, until: lm.minute + 6 };
+    say('none', 'fun', `${them}’s players keep looking over at the sideline. They’ve lost their focus.`);
+  } else {
+    lm.rattled = { mult: 1.08, until: lm.minute + 4 };
+    say('none', 'fun', `Uh oh. That seems to have fired ${them} up.`);
+  }
+}
+
+const FUNNY = [
+  '{n} stops to tie a lace. Play carries on without anyone noticing.',
+  '{n} waves to the parents on the sideline mid-run.',
+  'A dog runs onto the pitch. {n} tries to tackle it. The dog wins.',
+  '{n} asks the ref how long is left. The ref says “ages”.',
+  'A parent shouts “SHOOOOT!” from 40 yards out. {n} sensibly passes.',
+  '{n} does a celebration practice run. There was no goal.',
+  'Somebody’s little brother is in goal for a second. {n} escorts him off.',
+  '{n} does a step-over. Then another one. Then falls over. Lovely.',
+];
+
+function funnyMoment(s: Save, lm: LiveMatch, say: Say) {
+  const ids = SLOTS.map((x) => lm.onPitch[x.id]).filter(Boolean) as string[];
+  const id = jokePlayer(s, ids, () => rand(lm));
+  if (!id) return;
+  lm.fun = (lm.fun || 0) + 1;
+  say('us', 'fun', pick(lm, FUNNY).replace('{n}', name(s, id)));
 }
 
 function finishWhistle(s: Save, lm: LiveMatch) {
@@ -269,9 +327,9 @@ export function setTactic(lm: LiveMatch, t: Tactic) {
 }
 
 export const TALKS: { id: Talk; label: string }[] = [
-  { id: 'praise', label: 'Well done, keep going' },
-  { id: 'calm', label: 'Stay calm, stick to the plan' },
-  { id: 'fire', label: 'Come on! More effort!' },
+  { id: 'praise', label: 'Brilliant lads! Keep this up and it’s ice pops after!' },
+  { id: 'calm', label: 'Deep breaths. Pass, move, and NOBODY try a bicycle kick.' },
+  { id: 'fire', label: 'Right! Who had their Weetabix this morning?! MORE EFFORT!' },
 ];
 
 /** Half-time team talk. What works depends on the score, like in CM. */
@@ -288,9 +346,11 @@ export function teamTalk(s: Save, lm: LiveMatch, talk: Talk) {
   const idx = diff < 0 ? 0 : diff === 0 ? 1 : 2;
   const effect = table[talk][idx] + (rand(lm) - 0.5) * 0.02;
   lm.morale = 1 + effect;
-  const text = effect > 0.03 ? 'The players look fired up for the second half!'
-    : effect > 0 ? 'The players nod. They’re ready.'
-    : 'Hmm. Some of the players look fed up.';
+  const text = effect > 0.03
+    ? pick(lm, ['The players charge out like it’s the last day of school!', 'The lads are buzzing. Someone is doing a war cry.', 'Fired up! One of them is already doing stretches.'])
+    : effect > 0
+      ? pick(lm, ['A few nods. Someone asks if there are oranges.', 'The players nod. One is still eating a jelly.', 'They seem ready. Mostly.'])
+      : pick(lm, ['Hmm. Half the team is staring at a seagull.', 'Some of the players look fed up. One is lying down.', 'Silence. Then someone asks what time it is.']);
   lm.events.push({ m: HALF, side: 'us', kind: 'talk', text });
 }
 

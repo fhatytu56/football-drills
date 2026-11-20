@@ -79,6 +79,8 @@ export interface GamePlayer {
 export interface SessionResult {
   status: 'done' | 'missed' | 'empty';
   drills?: { drillId: string; title: string; phase: string; repeat: boolean }[];
+  /** A bit of fun from training (no effect on stats). */
+  mishap?: string;
   // older saves (quiz version)
   focus: string[];
   answers: { drillId: string; title: string; phase: string; correct: boolean; picked: string; right: string; prompt: string }[];
@@ -159,6 +161,12 @@ export interface Save {
   honours?: { season: number; pos: number; cup: boolean }[];
   /** Drills from the last session (running the same ones again in a row counts for less). */
   lastDrills?: string[];
+  /** How often each player has been in a joke, so it's spread evenly. */
+  jokes?: Record<string, number>;
+  /** Training sessions run, for picking the funny lines. */
+  sessions?: number;
+  /** The last few training jokes used, so they don't repeat. */
+  recentMishaps?: number[];
   /** Pre-match tactic. */
   tactic?: Tactic;
   /** A match being watched right now, so closing the app doesn't lose it. */
@@ -556,13 +564,59 @@ export function runSession(s: Save, drills: LibDrill[]): SessionResult {
   }
   for (const p of Object.values(s.players)) if (p.focus) grow(p, p.focus, INDIVIDUAL, gains);
   s.lastDrills = drills.map((d) => d.drill_id);
+  s.sessions = (s.sessions || 0) + 1;
   return {
     status: 'done',
     focus: [],
     answers: [],
     drills: drills.map((d) => ({ drillId: d.drill_id, title: d.title, phase: d.game_phase, repeat: last.has(d.drill_id) })),
     gains,
+    mishap: trainingMishap(s),
   };
+}
+
+// ---------- A bit of fun ----------
+
+/** The player who's been in the fewest jokes so far (ties broken by `r`). Counts them in. */
+export function jokePlayer(s: Save, ids: string[], r: () => number): string | undefined {
+  if (!ids.length) return undefined;
+  const jokes = (s.jokes ||= {});
+  const least = Math.min(...ids.map((id) => jokes[id] || 0));
+  const pool = ids.filter((id) => (jokes[id] || 0) === least);
+  const id = pool[Math.floor(r() * pool.length)];
+  jokes[id] = (jokes[id] || 0) + 1;
+  return id;
+}
+
+const MISHAPS = [
+  '{n} was late: the car got stuck behind a tractor.',
+  '{n} missed the warm-up looking for the other boot.',
+  '{n} sneaked off during the water break to finish a bag of jellies behind the goal.',
+  '{n} turned up in school shoes. Again.',
+  '{n} spent the water break trying to do keepie-uppies with an orange.',
+  '{n} brought sweets for everyone. Morale is sky high.',
+  '{n} arrived ten minutes late holding a 99 with a flake.',
+  '{n} forgot shin guards and used two copybooks instead.',
+  '{n} asked if training could be cancelled because of “a bit of wind”.',
+  '{n} did the whole warm-up with a jersey on backwards.',
+  '{n} was late because the dog ate a football sock.',
+  '{n} told everyone a cousin plays for Liverpool. Nobody believes it.',
+  '{n} tried to take a penalty with a crisp packet still in hand.',
+  '{n} got the cones out, then sat on one.',
+];
+
+/** About one session in three has something funny happen. Just for laughs. */
+function trainingMishap(s: Save): string | undefined {
+  const r = rng(hash(`${s.seed}:mishap:${s.sessions || 0}`));
+  if (r() > 0.36) return undefined;
+  const id = jokePlayer(s, Object.keys(s.players), r);
+  if (!id) return undefined;
+  // don't repeat any of the last few lines
+  const recent = (s.recentMishaps ||= []);
+  const fresh = MISHAPS.map((_, i) => i).filter((i) => !recent.includes(i));
+  const i = fresh[Math.floor(r() * fresh.length)];
+  s.recentMishaps = [...recent, i].slice(-6);
+  return MISHAPS[i].replace('{n}', s.players[id].name);
 }
 
 // ---------- The week ----------

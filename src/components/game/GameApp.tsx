@@ -4,12 +4,14 @@
 // Everyone starts equal. Players only improve by "running" the real Tuesday/Thursday drills,
 // which means remembering them. Weeks go at the kid's own pace: Tue, Thu, Sunday match, Next week.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@/lib/supabase/client';
 import { divisionFor, shortName } from '@/lib/game/ddsl';
 import {
   STATS, SLOTS, PHASE_LABEL, PHASE_STATS,
   newSave, syncSquad, playWeek, questionsFor, runSession, weekState, currentWeek, nextWeek, dayOf,
-  table, seasonOver, autoLineup, fits, cupRoundIn,
+  table, seasonOver, autoLineup, fits, cupRoundIn, summary,
   type Save, type PlanDrill, type LibDrill, type Question, type MatchResult, type SessionResult, type Slot, type StatKey,
 } from '@/lib/game/engine';
 
@@ -38,24 +40,20 @@ function fmtDate(iso: string, withDay = true) {
   return d.toLocaleDateString('en-IE', { timeZone: 'UTC', weekday: withDay ? 'short' : undefined, day: 'numeric', month: 'short' });
 }
 
-const storeKey = (token: string) => `wcfc-u10-game-${token}`;
+// Before logins, saves lived only in the phone's browser under this key. Offered once, then removed.
+const legacyKey = (token: string) => `wcfc-u10-game-${token}`;
 
-function loadSave(token: string): Save | null {
+function legacySave(token: string): Save | null {
   try {
-    const raw = window.localStorage.getItem(storeKey(token));
+    const raw = window.localStorage.getItem(legacyKey(token));
     return raw ? (JSON.parse(raw) as Save) : null;
   } catch {
     return null;
   }
 }
 
-function storeSave(token: string, s: Save) {
-  try {
-    window.localStorage.setItem(storeKey(token), JSON.stringify(s));
-    return true;
-  } catch {
-    return false;
-  }
+function dropLegacy(token: string) {
+  try { window.localStorage.removeItem(legacyKey(token)); } catch { /* nothing to do */ }
 }
 
 function statClass(v: number) {
@@ -69,18 +67,32 @@ const nameOf = (s: Save, team: string) => (team === s.team ? s.team : shortName(
 
 // ---------- shell ----------
 
+interface Account {
+  userId: string;
+  manager: string | null; // null = signed in but hasn't joined a team's game yet
+  team?: string;
+  token?: string;
+}
+
+type SaveState = 'saved' | 'saving' | 'error';
+
 export default function GameApp({ token }: { token: string }) {
+  const supabase = useMemo(createClient, []);
   const [data, setData] = useState<TeamData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [acct, setAcct] = useState<Account | null | 'checking'>('checking');
   const [save, setSave] = useState<Save | null>(null);
-  const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<Tab>('home');
   const [session, setSession] = useState<Day | null>(null);
   const [showMatch, setShowMatch] = useState<{ w: number; which: 'match' | 'cup' } | null>(null);
   const [news, setNews] = useState<string[]>([]);
-  const [storeOk, setStoreOk] = useState(true);
+  const [saveState, setSaveState] = useState<SaveState>('saved');
+  const [joinMsg, setJoinMsg] = useState<string | null>(null);
   const today = useMemo(todayIso, []);
+  const pending = useRef<Save | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Team data comes from the link, signed in or not.
   useEffect(() => {
     fetch(`/api/game/${token}`)
       .then(async (r) => {
@@ -88,18 +100,64 @@ export default function GameApp({ token }: { token: string }) {
         if (!r.ok) throw new Error(j.error || 'Something went wrong. Try again.');
         return j as TeamData;
       })
-      .then((d) => {
-        setData(d);
-        const s = loadSave(token);
-        if (s && divisionFor(d.team)?.name === s.division) {
-          syncSquad(s, d.players);
-          setStoreOk(storeSave(token, s));
-          setSave(s);
-        }
-        setLoaded(true);
-      })
+      .then(setData)
       .catch((e) => setError(e.message));
-  }, [token, today]);
+  }, [token]);
+
+  /** Who's signed in, and their saved game. */
+  const refresh = useCallback(async () => {
+    const { data: u } = await supabase.auth.getUser();
+    if (!u.user) { setAcct(null); setSave(null); return; }
+    const { data: mine, error: e } = await supabase.rpc('game_mine');
+    if (e) { setError('Couldn’t load your game. Try again.'); return; }
+    if (!mine) { setAcct({ userId: u.user.id, manager: null }); setSave(null); return; }
+    setAcct({ userId: u.user.id, manager: mine.manager_name, team: mine.team, token: mine.token });
+    setSave((mine.save as Save | null) || null);
+  }, [supabase]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Bring the squad up to date once both the team data and the save are here.
+  const synced = useRef(false);
+  useEffect(() => {
+    if (!data || !save || synced.current) return;
+    synced.current = true;
+    setSave((prev) => {
+      if (!prev) return prev;
+      const next = structuredClone(prev);
+      syncSquad(next, data.players);
+      return next;
+    });
+  }, [data, save]);
+
+  const flush = useCallback(async () => {
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    const s = pending.current;
+    if (!s || !acct || acct === 'checking') return;
+    pending.current = null;
+    const sum = summary(s);
+    const { error: e } = await supabase
+      .from('game_saves')
+      .update({ save: s, ...sum, updated_at: new Date().toISOString() })
+      .eq('user_id', acct.userId);
+    if (e) { pending.current = pending.current || s; setSaveState('error'); } else if (!pending.current) setSaveState('saved');
+  }, [supabase, acct]);
+
+  const persist = useCallback((s: Save) => {
+    pending.current = s;
+    setSaveState('saving');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(flush, 800);
+  }, [flush]);
+
+  // Don't lose the last move if the phone locks or the tab closes.
+  useEffect(() => {
+    const out = () => { if (pending.current) flush(); };
+    const vis = () => { if (document.visibilityState === 'hidden') out(); };
+    window.addEventListener('pagehide', out);
+    document.addEventListener('visibilitychange', vis);
+    return () => { window.removeEventListener('pagehide', out); document.removeEventListener('visibilitychange', vis); };
+  }, [flush]);
 
   const update = useCallback(
     (fn: (s: Save) => void) => {
@@ -107,15 +165,24 @@ export default function GameApp({ token }: { token: string }) {
         if (!prev) return prev;
         const next = structuredClone(prev);
         fn(next);
-        setStoreOk(storeSave(token, next));
+        persist(next);
         return next;
       });
     },
-    [token]
+    [persist]
   );
 
+  const signOut = async () => {
+    await flush();
+    await supabase.auth.signOut();
+    synced.current = false;
+    setAcct(null);
+    setSave(null);
+    setTab('home');
+  };
+
   if (error) return <Frame><Panel title="Wayside U10 Manager"><p className="text-sm">{error}</p></Panel></Frame>;
-  if (!data || !loaded) return <Frame><p className="text-center text-slate-300 py-16 text-sm">Loading…</p></Frame>;
+  if (!data || acct === 'checking') return <Frame><p className="text-center text-slate-300 py-16 text-sm">Loading…</p></Frame>;
 
   const div = divisionFor(data.team);
   if (!div) {
@@ -128,17 +195,46 @@ export default function GameApp({ token }: { token: string }) {
     );
   }
 
+  if (!acct) return <Frame><SignIn supabase={supabase} token={token} team={data.team} onDone={(m) => { setJoinMsg(m || null); refresh(); }} /></Frame>;
+  if (!acct.manager) return <Frame><Join supabase={supabase} token={token} team={data.team} hint={joinMsg} onDone={refresh} onSignOut={signOut} /></Frame>;
+  if (acct.token !== token) {
+    return (
+      <Frame>
+        <div className="p-2 pt-6 space-y-2">
+          <Panel title="Wrong team link">
+            <p className="text-sm">
+              <b>{acct.manager}</b> manages <b>Wayside {acct.team}</b>. This link is for Wayside {data.team}.
+            </p>
+            <div className="flex justify-between mt-3">
+              <Btn tone="plain" onClick={signOut}>Log out</Btn>
+              <a href={`/game/${acct.token}`}><Btn>Open my game</Btn></a>
+            </div>
+          </Panel>
+        </div>
+      </Frame>
+    );
+  }
+
   if (!save) {
+    const old = legacySave(token);
     return (
       <Frame>
         <Intro
           team={data.team}
           division={div.name}
           squad={data.players.length}
-          onStart={() => {
-            const s = newSave({ team: `Wayside ${data.team}`, division: div.name, today, players: data.players });
-            setStoreOk(storeSave(token, s));
+          manager={acct.manager}
+          hasOld={!!old && old.division === div.name}
+          onStart={(keepOld) => {
+            let s: Save;
+            if (keepOld && old) { s = old; syncSquad(s, data.players); } else s = newSave({ team: `Wayside ${data.team}`, division: div.name, today, players: data.players });
+            synced.current = true;
             setSave(s);
+            persist(s);
+            if (keepOld && old) {
+              dropLegacy(token);
+              setNews(['Your game from this phone is now saved to your login. You can play it on any phone now.']);
+            }
           }}
         />
       </Frame>
@@ -149,7 +245,7 @@ export default function GameApp({ token }: { token: string }) {
 
   return (
     <Frame>
-      <TopBar save={save} />
+      <TopBar save={save} saveState={saveState} />
       <nav className="grid grid-cols-6 gap-px bg-slate-600 border-y border-slate-500 text-[11px] font-bold">
         {(['home', 'squad', 'tactics', 'fixtures', 'table', 'cup'] as Tab[]).map((t) => (
           <button
@@ -162,9 +258,10 @@ export default function GameApp({ token }: { token: string }) {
         ))}
       </nav>
 
-      {!storeOk && (
-        <p className="m-2 text-[11px] bg-red-900/60 border border-red-700 p-2">
-          This browser won’t keep your save (private mode?). Progress will be lost when you close it.
+      {saveState === 'error' && (
+        <p className="m-2 text-[11px] bg-red-900/60 border border-red-700 p-2 flex items-center justify-between gap-2">
+          <span>Couldn’t save your game. Check your internet.</span>
+          <button className="underline font-bold" onClick={() => { if (save) persist(save); }}>Try again</button>
         </p>
       )}
 
@@ -196,10 +293,12 @@ export default function GameApp({ token }: { token: string }) {
             }}
             onShowMatch={(which, wk) => setShowMatch({ w: wk, which })}
             onNextWeek={() => { setNews([]); update((s) => { nextWeek(s); }); }}
+            manager={acct.manager}
+            onSignOut={signOut}
             onNewSeason={() => {
               const s = newSave({ team: save.team, division: save.division, today, players: data.players, season: save.season + 1, carry: save });
-              setStoreOk(storeSave(token, s));
               setSave(s);
+              persist(s);
               setNews([`Season ${s.season}. Your players keep what they learned, but every other team has got better too.`]);
             }}
           />
@@ -210,7 +309,10 @@ export default function GameApp({ token }: { token: string }) {
         ) : tab === 'fixtures' ? (
           <Fixtures save={save} onShow={(wk) => setShowMatch({ w: wk, which: 'match' })} />
         ) : tab === 'table' ? (
-          <LeagueTable save={save} />
+          <>
+            <LeagueTable save={save} />
+            <Leaderboard supabase={supabase} token={token} team={data.team} />
+          </>
         ) : (
           <Cup save={save} />
         )}
@@ -241,7 +343,7 @@ function Panel({ title, right, children }: { title: string; right?: React.ReactN
   );
 }
 
-function TopBar({ save }: { save: Save }) {
+function TopBar({ save, saveState }: { save: Save; saveState: SaveState }) {
   const w = currentWeek(save);
   const pos = table(save).findIndex((r) => r.team === save.team) + 1;
   const started = save.results.length > 0;
@@ -256,6 +358,9 @@ function TopBar({ save }: { save: Save }) {
       </div>
       <div className="text-right text-[11px] leading-tight">
         <p className="font-bold">{fmtDate(dayOf.sunday(save, w))}</p>
+        <p className={saveState === 'error' ? 'text-red-400' : 'text-slate-400'}>
+          {saveState === 'saved' ? 'Saved ✓' : saveState === 'saving' ? 'Saving…' : 'Not saved'}
+        </p>
         <p className="text-slate-300">
           Week {Math.min(w + 1, save.weeks)}/{save.weeks}
           {started && <> · {pos}{['th', 'st', 'nd', 'rd'][pos % 10 > 3 || Math.floor(pos / 10) === 1 ? 0 : pos % 10]}</>}
@@ -265,9 +370,12 @@ function TopBar({ save }: { save: Save }) {
   );
 }
 
-function Btn({ children, onClick, disabled, tone = 'go' }: { children: React.ReactNode; onClick?: () => void; disabled?: boolean; tone?: 'go' | 'plain' }) {
+function Btn({ children, onClick, disabled, tone = 'go', type = 'button' }: {
+  children: React.ReactNode; onClick?: () => void; disabled?: boolean; tone?: 'go' | 'plain'; type?: 'button' | 'submit';
+}) {
   return (
     <button
+      type={type}
       onClick={onClick}
       disabled={disabled}
       className={`px-3 py-2 text-xs font-bold uppercase tracking-wide border ${
@@ -285,7 +393,9 @@ function Btn({ children, onClick, disabled, tone = 'go' }: { children: React.Rea
 
 // ---------- intro ----------
 
-function Intro({ team, division, squad, onStart }: { team: string; division: string; squad: number; onStart: () => void }) {
+function Intro({ team, division, squad, manager, hasOld, onStart }: {
+  team: string; division: string; squad: number; manager: string; hasOld: boolean; onStart: (keepOld: boolean) => void;
+}) {
   return (
     <div className="p-2 pt-6 space-y-2">
       <div className="text-center pb-2">
@@ -294,25 +404,41 @@ function Intro({ team, division, squad, onStart }: { team: string; division: str
       </div>
       <Panel title="Your new job">
         <div className="text-sm space-y-2">
-          <p>You’re the manager of <b>Wayside {team}</b> in the DDSL <b>{division} Boys Sunday</b> league.</p>
+          <p>Welcome, <b>{manager}</b>. You’re the manager of <b>Wayside {team}</b> in the DDSL <b>{division} Boys Sunday</b> league.</p>
           <p>All {squad} players start at exactly the same level. The only way to make them better is training.</p>
           <p><b>Tuesday and Thursday:</b> run the drills you did at real training. Remember them right and your players improve more.</p>
           <p><b>Sunday:</b> pick your team and play the match. Win the league. Win the cup.</p>
           <p className="text-slate-300 text-xs">Play as many weeks as you like. Skip training and your players don’t improve that week.</p>
         </div>
       </Panel>
-      <div className="flex justify-end"><Btn onClick={onStart}>Start season</Btn></div>
+      {hasOld ? (
+        <Panel title="Game on this phone">
+          <p className="text-sm">There’s already a game on this phone from before logins. Keep it and save it to your login?</p>
+          <div className="flex justify-between mt-2">
+            <Btn tone="plain" onClick={() => onStart(false)}>Start fresh</Btn>
+            <Btn onClick={() => onStart(true)}>Keep my game</Btn>
+          </div>
+        </Panel>
+      ) : (
+        <div className="flex justify-end"><Btn onClick={() => onStart(false)}>Start season</Btn></div>
+      )}
     </div>
   );
 }
 
 // ---------- home / inbox ----------
 
-function Home({ save, w, plan, news, onTrain, onPlay, onShowMatch, onNextWeek, onNewSeason }: {
-  save: Save; w: number; plan: PlanDrill[]; news: string[];
+function Home({ save, w, plan, news, manager, onTrain, onPlay, onShowMatch, onNextWeek, onNewSeason, onSignOut }: {
+  save: Save; w: number; plan: PlanDrill[]; news: string[]; manager: string;
   onTrain: (d: Day) => void; onPlay: () => void; onShowMatch: (which: 'match' | 'cup', w: number) => void;
-  onNextWeek: () => void; onNewSeason: () => void;
+  onNextWeek: () => void; onNewSeason: () => void; onSignOut: () => void;
 }) {
+  const footer = (
+    <p className="text-[11px] text-slate-400 flex justify-between pt-1">
+      <span>Manager: <b className="text-slate-200">{manager}</b></span>
+      <button className="underline" onClick={onSignOut}>Log out</button>
+    </p>
+  );
   if (seasonOver(save)) {
     const t = table(save);
     const pos = t.findIndex((r) => r.team === save.team) + 1;
@@ -331,6 +457,7 @@ function Home({ save, w, plan, news, onTrain, onPlay, onShowMatch, onNextWeek, o
           </div>
         </Panel>
         <div className="flex justify-end"><Btn onClick={onNewSeason}>Next season</Btn></div>
+        {footer}
       </>
     );
   }
@@ -413,6 +540,7 @@ function Home({ save, w, plan, news, onTrain, onPlay, onShowMatch, onNextWeek, o
       )}
 
       <MiniTable save={save} />
+      {footer}
     </>
   );
 }
@@ -840,3 +968,155 @@ function Cup({ save }: { save: Save }) {
   );
 }
 
+
+// ---------- logins ----------
+
+const field = 'w-full text-sm px-2 py-2 bg-slate-900 border border-slate-500 text-slate-100';
+
+function SignIn({ supabase, token, team, onDone }: { supabase: SupabaseClient; token: string; team: string; onDone: (msg?: string) => void }) {
+  const [mode, setMode] = useState<'new' | 'login'>('new');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const go = async () => {
+    setMsg(null);
+    if (!email.includes('@')) return setMsg('Enter a parent’s email address.');
+    if (password.length < 6) return setMsg('The password needs at least 6 characters.');
+    if (mode === 'new' && name.trim().length < 2) return setMsg('Pick a manager nickname (2–20 letters).');
+    setBusy(true);
+    try {
+      if (mode === 'new') {
+        const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+        if (error) {
+          setMsg(/registered|exists/i.test(error.message) ? 'That email already has a login. Tap “Log in” instead.' : error.message);
+          return;
+        }
+        if (!data.session) {
+          setMsg('Sign-ups aren’t switched on yet. Ask the coach.');
+          return;
+        }
+        const { data: res } = await supabase.rpc('game_join', { p_token: token, p_name: name });
+        if (res === 'taken') return onDone(`“${name.trim()}” is already used on this team. Pick another nickname.`);
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (error) { setMsg('Wrong email or password.'); return; }
+      }
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="p-2 pt-6 space-y-2">
+      <div className="text-center pb-2">
+        <img src="/crest.jpg" alt="" className="w-16 h-16 mx-auto rounded border border-slate-400" />
+        <h1 className="mt-2 text-lg font-bold">Wayside U10 Manager</h1>
+        <p className="text-xs text-slate-300">Wayside {team}</p>
+      </div>
+      <div className="grid grid-cols-2 gap-px bg-slate-600 border border-slate-500 text-xs font-bold">
+        {(['new', 'login'] as const).map((m) => (
+          <button key={m} onClick={() => { setMode(m); setMsg(null); }} className={`py-2 uppercase ${mode === m ? 'bg-amber-300 text-slate-900' : 'bg-slate-800 text-slate-200'}`}>
+            {m === 'new' ? 'New manager' : 'Log in'}
+          </button>
+        ))}
+      </div>
+      <Panel title={mode === 'new' ? 'Make your login' : 'Log in'}>
+        <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); go(); }}>
+          {mode === 'new' && <p className="text-xs text-slate-300">Ask a parent to put in their email and pick a password with you. Your game is saved to it, so you can play on any phone.</p>}
+          <label className="block text-xs">Parent’s email
+            <input className={field} type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+          </label>
+          <label className="block text-xs">Password
+            <input className={field} type="password" autoComplete={mode === 'new' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          {mode === 'new' && (
+            <label className="block text-xs">Manager nickname <span className="text-slate-400">(not your real name — others on the team see it)</span>
+              <input className={field} maxLength={20} value={name} onChange={(e) => setName(e.target.value)} />
+            </label>
+          )}
+          {msg && <p className="text-xs text-red-300">{msg}</p>}
+          <div className="flex justify-end"><Btn type="submit" disabled={busy}>{busy ? 'Wait…' : mode === 'new' ? 'Start' : 'Log in'}</Btn></div>
+          {mode === 'login' && <p className="text-[11px] text-slate-400">Forgot the password? Make a new login with a different email. The old game can’t be got back.</p>}
+        </form>
+      </Panel>
+    </div>
+  );
+}
+
+function Join({ supabase, token, team, hint, onDone, onSignOut }: {
+  supabase: SupabaseClient; token: string; team: string; hint: string | null; onDone: () => void; onSignOut: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(hint);
+  const go = async () => {
+    setMsg(null);
+    setBusy(true);
+    const { data: res, error } = await supabase.rpc('game_join', { p_token: token, p_name: name });
+    setBusy(false);
+    if (error) return setMsg('Something went wrong. Try again.');
+    if (res === 'taken') return setMsg('That nickname is already used on this team. Try another.');
+    if (res === 'bad_name') return setMsg('Nicknames are 2–20 letters.');
+    if (res === 'bad_link') return setMsg('This game link isn’t valid. Ask your coach for it again.');
+    onDone();
+  };
+  return (
+    <div className="p-2 pt-6 space-y-2">
+      <Panel title={`Join Wayside ${team}`}>
+        <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); go(); }}>
+          <label className="block text-xs">Manager nickname <span className="text-slate-400">(not your real name — others on the team see it)</span>
+            <input className={field} maxLength={20} value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          {msg && <p className="text-xs text-red-300">{msg}</p>}
+          <div className="flex justify-between">
+            <Btn tone="plain" onClick={onSignOut}>Log out</Btn>
+            <Btn type="submit" disabled={busy || name.trim().length < 2}>Start</Btn>
+          </div>
+        </form>
+      </Panel>
+    </div>
+  );
+}
+
+interface LeaderRow { manager_name: string; season: number; played: number; pts: number; pos: number | null; gd: number; cups: number; titles: number; me: boolean }
+
+function Leaderboard({ supabase, token, team }: { supabase: SupabaseClient; token: string; team: string }) {
+  const [rows, setRows] = useState<LeaderRow[] | null>(null);
+  useEffect(() => {
+    supabase.rpc('game_leaderboard', { p_token: token }).then(({ data }) => setRows((data as LeaderRow[]) || []));
+  }, [supabase, token]);
+  return (
+    <Panel title={`Wayside ${team} managers`}>
+      {!rows ? <p className="text-xs text-slate-400">Loading…</p> : rows.length === 0 ? <p className="text-xs text-slate-400">No one else yet.</p> : (
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-300">
+              <th className="font-normal text-left">#</th><th className="font-normal text-left">Manager</th>
+              <th className="font-normal">Ssn</th><th className="font-normal">P</th><th className="font-normal">Pts</th>
+              <th className="font-normal">Pos</th><th className="font-normal" title="League titles">🏆</th><th className="font-normal" title="Cups">Cup</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={r.manager_name} className={r.me ? 'bg-amber-300 text-slate-900 font-bold' : 'odd:bg-slate-800/50'}>
+                <td className="py-0.5">{i + 1}</td>
+                <td className="truncate max-w-[7rem]">{r.manager_name}</td>
+                <td className="text-center tabular-nums">{r.season}</td>
+                <td className="text-center tabular-nums">{r.played}</td>
+                <td className="text-center tabular-nums">{r.pts}</td>
+                <td className="text-center tabular-nums">{r.pos ?? '–'}</td>
+                <td className="text-center tabular-nums">{r.titles}</td>
+                <td className="text-center tabular-nums">{r.cups}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p className="text-[10px] text-slate-400 mt-2">Ranked by league titles, then cups, then season, then points. Pos = league position this season.</p>
+    </Panel>
+  );
+}

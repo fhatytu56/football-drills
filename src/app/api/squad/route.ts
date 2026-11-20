@@ -13,8 +13,16 @@ export async function GET(request: Request) {
     const coach = await requireCoach(supabase, group.id);
     if (coach instanceof NextResponse) return coach;
 
+    // U10s also get each team's manager game link (column from migration 011; skipped if not run yet).
+    const teamsQuery = async () => {
+      if (group.id === 'u10') {
+        const res = await supabase.from('teams').select('id, name, created_at, game_token').eq('age_group', group.id).order('created_at');
+        if (!res.error || !res.error.message.includes('game_token')) return res;
+      }
+      return supabase.from('teams').select('id, name, created_at').eq('age_group', group.id).order('created_at');
+    };
     const [teams, players] = await Promise.all([
-      supabase.from('teams').select('id, name, created_at').eq('age_group', group.id).order('created_at'),
+      teamsQuery(),
       supabase
         .from('players')
         .select('id, team_id, first_name, positions, created_at')

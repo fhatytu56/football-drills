@@ -51,6 +51,18 @@ Anyone can view. Only coaches linked to a group can add/delete drills or change 
 
 Database changes live in `supabase/migrations/002_age_groups.sql` (run once in the Supabase SQL Editor). U9 Girls (`u9g`) was added in `010_u9_girls.sql`; it plays like U9s (5-a-side, two games on the day, no positions).
 
+## U10 Manager game (kids, no login)
+
+A Championship Manager 99/00-style game for the U10 Sunday teams. Each team has a secret game link: coaches see **Copy link** under the team name in U10 → Squads and drop it into the team WhatsApp. Kids open it on their own phone; their save stays in that phone's browser.
+
+- **Everyone starts equal.** Every stat (Passing, Dribbling, Shooting, Tackling, Positioning, Keeping, Fitness) starts at 5 out of 20.
+- **Training = remembering real training.** On Tuesday and Thursday the game runs the drills in the U10 Tuesday/Thursday plan. Each drill asks one question (which drill did we do, what is it working on, what kit do you need). Right answer = full boost to the stats that drill trains; wrong = small boost and the answer is shown. Kids pick 2 players for extra coaching (double boost).
+- **Real weeks.** Tuesday's session opens on Tuesday, Thursday's on Thursday, the match on Sunday. Weeks that go by are played automatically with no training. Coaches can try later weeks with `?today=2027-01-10` on the link.
+- **DDSL.** Teams named `10.2`, `10.11`, `10.19` play their real DDSL Sunday division (teams + real fixture dates, snapshot in `src/lib/game/ddsl.ts`). DDSL publishes no U10 results, tables or cup, so results are simulated and the cup is a made-up 16-team knockout of the clubs in those divisions. Other team names see "not in the game yet".
+- Rules and balance live in `src/lib/game/engine.ts` (no UI), the screens in `src/components/game/GameApp.tsx`.
+
+Database: `supabase/migrations/011_manager_game.sql` adds `teams.game_token` and the `game_team(token)` function (first names + positions for that one U10 team, plus the U10 Tue/Thu plan). Run it before merging.
+
 ## Match Day (coaches only)
 
 Pick an upcoming match (players who said Yes are ticked) or a quick game, untick anyone missing, check the starting line-up and the sub plan under it (U10s/U11s are placed by main then second position; the keeper spot is left empty if nobody has GK), then **Kick off**.

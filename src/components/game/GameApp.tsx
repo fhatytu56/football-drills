@@ -2,14 +2,14 @@
 
 // Wayside U10 Manager — a Championship Manager 99/00-style game for the kids.
 // Everyone starts equal. Players only improve by "running" the real Tuesday/Thursday drills,
-// which means remembering them. One game week = one real week.
+// which means remembering them. Weeks go at the kid's own pace: Tue, Thu, Sunday match, Next week.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { divisionFor, shortName } from '@/lib/game/ddsl';
 import {
   STATS, SLOTS, PHASE_LABEL, PHASE_STATS,
-  newSave, syncSquad, catchUp, playWeek, questionsFor, runSession, weekState, weekOf, dayOf,
-  table, seasonOver, autoLineup, fits, cupRoundIn, daysBetween,
+  newSave, syncSquad, playWeek, questionsFor, runSession, weekState, currentWeek, nextWeek, dayOf,
+  table, seasonOver, autoLineup, fits, cupRoundIn,
   type Save, type PlanDrill, type LibDrill, type Question, type MatchResult, type SessionResult, type Slot, type StatKey,
 } from '@/lib/game/engine';
 
@@ -28,13 +28,8 @@ const DAY_NAME: Record<Day, string> = { tuesday: 'Tuesday', thursday: 'Thursday'
 
 // ---------- helpers ----------
 
+/** The season starts in the real week the kid starts, so real DDSL fixture dates line up. */
 function todayIso() {
-  // ?today=2026-12-06 lets a coach try later weeks. Kids gain nothing by skipping ahead:
-  // weeks that go by are played without training.
-  if (typeof window !== 'undefined') {
-    const q = new URLSearchParams(window.location.search).get('today');
-    if (q && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
-  }
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Dublin' }).format(new Date());
 }
 
@@ -98,12 +93,6 @@ export default function GameApp({ token }: { token: string }) {
         const s = loadSave(token);
         if (s && divisionFor(d.team)?.name === s.division) {
           syncSquad(s, d.players);
-          const auto = catchUp(s, today);
-          if (auto.length) {
-            setNews([
-              `${auto.length === 1 ? 'A week' : `${auto.length} weeks`} went by without you, so the ${auto.length === 1 ? 'match was' : 'matches were'} played with no training.`,
-            ]);
-          }
           setStoreOk(storeSave(token, s));
           setSave(s);
         }
@@ -156,11 +145,11 @@ export default function GameApp({ token }: { token: string }) {
     );
   }
 
-  const w = Math.min(weekOf(save, today), save.weeks - 1);
+  const w = currentWeek(save);
 
   return (
     <Frame>
-      <TopBar save={save} today={today} />
+      <TopBar save={save} />
       <nav className="grid grid-cols-6 gap-px bg-slate-600 border-y border-slate-500 text-[11px] font-bold">
         {(['home', 'squad', 'tactics', 'fixtures', 'table', 'cup'] as Tab[]).map((t) => (
           <button
@@ -197,7 +186,6 @@ export default function GameApp({ token }: { token: string }) {
         ) : tab === 'home' ? (
           <Home
             save={save}
-            today={today}
             w={w}
             plan={data.plan}
             news={news}
@@ -207,6 +195,7 @@ export default function GameApp({ token }: { token: string }) {
               setShowMatch({ w, which: 'match' });
             }}
             onShowMatch={(which, wk) => setShowMatch({ w: wk, which })}
+            onNextWeek={() => { setNews([]); update((s) => { nextWeek(s); }); }}
             onNewSeason={() => {
               const s = newSave({ team: save.team, division: save.division, today, players: data.players, season: save.season + 1, carry: save });
               setStoreOk(storeSave(token, s));
@@ -252,8 +241,8 @@ function Panel({ title, right, children }: { title: string; right?: React.ReactN
   );
 }
 
-function TopBar({ save, today }: { save: Save; today: string }) {
-  const w = weekOf(save, today);
+function TopBar({ save }: { save: Save }) {
+  const w = currentWeek(save);
   const pos = table(save).findIndex((r) => r.team === save.team) + 1;
   const started = save.results.length > 0;
   return (
@@ -266,7 +255,7 @@ function TopBar({ save, today }: { save: Save; today: string }) {
         </div>
       </div>
       <div className="text-right text-[11px] leading-tight">
-        <p className="font-bold">{fmtDate(today)}</p>
+        <p className="font-bold">{fmtDate(dayOf.sunday(save, w))}</p>
         <p className="text-slate-300">
           Week {Math.min(w + 1, save.weeks)}/{save.weeks}
           {started && <> · {pos}{['th', 'st', 'nd', 'rd'][pos % 10 > 3 || Math.floor(pos / 10) === 1 ? 0 : pos % 10]}</>}
@@ -309,7 +298,7 @@ function Intro({ team, division, squad, onStart }: { team: string; division: str
           <p>All {squad} players start at exactly the same level. The only way to make them better is training.</p>
           <p><b>Tuesday and Thursday:</b> run the drills you did at real training. Remember them right and your players improve more.</p>
           <p><b>Sunday:</b> pick your team and play the match. Win the league. Win the cup.</p>
-          <p className="text-slate-300 text-xs">One week in the game is one real week. Miss a week and your team plays without training.</p>
+          <p className="text-slate-300 text-xs">Play as many weeks as you like. Skip training and your players don’t improve that week.</p>
         </div>
       </Panel>
       <div className="flex justify-end"><Btn onClick={onStart}>Start season</Btn></div>
@@ -319,9 +308,10 @@ function Intro({ team, division, squad, onStart }: { team: string; division: str
 
 // ---------- home / inbox ----------
 
-function Home({ save, today, w, plan, news, onTrain, onPlay, onShowMatch, onNewSeason }: {
-  save: Save; today: string; w: number; plan: PlanDrill[]; news: string[];
-  onTrain: (d: Day) => void; onPlay: () => void; onShowMatch: (which: 'match' | 'cup', w: number) => void; onNewSeason: () => void;
+function Home({ save, w, plan, news, onTrain, onPlay, onShowMatch, onNextWeek, onNewSeason }: {
+  save: Save; w: number; plan: PlanDrill[]; news: string[];
+  onTrain: (d: Day) => void; onPlay: () => void; onShowMatch: (which: 'match' | 'cup', w: number) => void;
+  onNextWeek: () => void; onNewSeason: () => void;
 }) {
   if (seasonOver(save)) {
     const t = table(save);
@@ -354,14 +344,12 @@ function Home({ save, today, w, plan, news, onTrain, onPlay, onShowMatch, onNewS
   const sessionRow = (day: Day) => {
     const res = ws[day];
     const date = dayOf[day](save, w);
-    const open = daysBetween(date, today) >= 0;
     const drills = plan.filter((d) => d.day === day).length;
     let status: React.ReactNode;
     if (res?.status === 'done') status = <span className="text-lime-300">Done · {res.answers.filter((a) => a.correct).length}/{res.answers.length} remembered</span>;
     else if (res?.status === 'missed') status = <span className="text-red-400">Missed</span>;
     else if (ws.match) status = <span className="text-red-400">Missed</span>;
     else if (!drills) status = <span className="text-slate-400">No drills planned yet</span>;
-    else if (!open) status = <span className="text-slate-400">Opens {fmtDate(date)}</span>;
     else status = <Btn onClick={() => onTrain(day)}>Train</Btn>;
     return (
       <div className="flex items-center justify-between py-1.5 border-b border-slate-600 last:border-0">
@@ -372,7 +360,7 @@ function Home({ save, today, w, plan, news, onTrain, onPlay, onShowMatch, onNewS
   };
 
   const sunday = dayOf.sunday(save, w);
-  const matchOpen = daysBetween(sunday, today) >= 0;
+  const trained = (['tuesday', 'thursday'] as Day[]).filter((d) => ws[d]?.status === 'done').length;
 
   return (
     <>
@@ -403,16 +391,16 @@ function Home({ save, today, w, plan, news, onTrain, onPlay, onShowMatch, onNewS
                   <Btn tone="plain" onClick={() => onShowMatch('match', w)}>Report</Btn>
                 </span>
               </>
-            ) : matchOpen ? (
+            ) : (
               <>
-                <span className="text-xs text-slate-300">Check your team in Tactics first.</span>
+                <span className="text-xs text-slate-300">
+                  {trained < 2 ? `Only ${trained} of 2 trainings done — untrained weeks don’t improve anyone.` : 'Check your team in Tactics first.'}
+                </span>
                 <Btn onClick={onPlay}>Play match</Btn>
               </>
-            ) : (
-              <span className="text-xs text-slate-400">Kick-off on Sunday. Train first!</span>
             )}
           </div>
-          {ws.match && <p className="text-[11px] text-slate-400 mt-2">Next week’s training opens on Tuesday.</p>}
+          {ws.match && <div className="flex justify-end mt-2"><Btn onClick={onNextWeek}>Next week ▶</Btn></div>}
         </Panel>
       )}
 

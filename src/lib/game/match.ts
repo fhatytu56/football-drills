@@ -3,8 +3,10 @@
 // Everything lives in a LiveMatch object that is saved, so closing the app mid-game is fine.
 
 import { shortName } from './ddsl';
+import { fill, GOAL_US, GOAL_THEM, SAVE_BY_THEM, MISS_US, SAVE_BY_US, MISS_THEM, PLAY_US, PLAY_THEM } from './commentary';
 import {
   SLOTS, lambda, teamStrength, teamRating, credit, recordLeagueWeek, recordCup, closeTraining, weekState, hash, jokePlayer,
+  spiritFactor, afterResult,
   type Save, type Lineup, type Slot, type MatchResult,
 } from './engine';
 
@@ -56,6 +58,10 @@ export interface LiveMatch {
   coachAt?: number;
   /** Funny moments so far this match (max 2). */
   fun?: number;
+  /** Rested this week: legs tire more slowly. */
+  fresh?: boolean;
+  /** Commentary lines used recently, so they don't repeat. */
+  recent?: string[];
 }
 
 // ---------- random with saved state ----------
@@ -70,6 +76,15 @@ function rand(lm: LiveMatch) {
 
 function pick<T>(lm: LiveMatch, arr: T[]): T {
   return arr[Math.floor(rand(lm) * arr.length)];
+}
+
+/** Pick a commentary line not used in the last eight picks. */
+function fresh(lm: LiveMatch, arr: string[]): string {
+  const recent = (lm.recent ||= []);
+  const options = arr.filter((l) => !recent.includes(l));
+  const line = pick(lm, options.length ? options : arr);
+  lm.recent = [...recent, line].slice(-8);
+  return line;
 }
 
 // ---------- set-up ----------
@@ -92,6 +107,8 @@ export function startLive(s: Save, kind: 'league' | 'cup', w: number, opp: strin
     done: false,
     fun: 0,
   };
+  lm.fresh = !!s.fresh;
+  s.fresh = false;
   // Roughly 4 matches in 10, their coach loses it at some point.
   lm.coachAt = rand(lm) < 0.4 ? 6 + Math.floor(rand(lm) * 40) : 0;
   const them = shortName(opp);
@@ -136,9 +153,10 @@ function strengths(s: Save, lm: LiveMatch) {
   const oppTired = 1 - 0.12 * (lm.minute / FULL);
   const rattled = lm.rattled && lm.minute < lm.rattled.until ? lm.rattled.mult : 1;
   const them = teamRating(s, lm.opp, lm.w) * oppTired * rattled;
+  const sp = spiritFactor(s);
   return {
-    att: us.att * tac.att * lm.morale,
-    def: us.def * tac.def * lm.morale,
+    att: us.att * tac.att * lm.morale * sp,
+    def: us.def * tac.def * lm.morale * sp,
     pas: us.pas * lm.morale,
     them,
   };
@@ -160,7 +178,7 @@ function tire(s: Save, lm: LiveMatch) {
     if (!p) continue;
     if (on.has(id)) {
       const gk = lm.onPitch.gk === id;
-      const drop = (1.6 - 0.05 * p.s.fitness) * (gk ? 0.4 : 1);
+      const drop = (1.6 - 0.05 * p.s.fitness) * (gk ? 0.4 : 1) * (lm.fresh ? 0.75 : 1);
       lm.energy[id] = Math.max(15, lm.energy[id] - drop);
     } else {
       lm.energy[id] = Math.min(100, lm.energy[id] + 1.5);
@@ -180,53 +198,49 @@ export function stepLive(s: Save, lm: LiveMatch) {
   const r = rand(lm);
   const say = (side: LiveEvent['side'], kind: LiveEvent['kind'], text: string) => lm.events.push({ m, side, kind, text });
 
+  const keeper = name(s, lm.onPitch.gk);
+  const v = (shooter?: string) => {
+    const p = shooter || ourPlayer(s, lm, 'pass');
+    let a = ourPlayer(s, lm, 'pass');
+    if (a === p) a = ourPlayer(s, lm, 'pass');
+    const o = oppPlayer(lm);
+    return {
+      p: name(s, p), a: a && a !== p ? name(s, a) : 'a teammate', d: name(s, ourPlayer(s, lm, 'tackle')), k: keeper,
+      t: them, o, T: o.charAt(0).toUpperCase() + o.slice(1),
+    };
+  };
+  const scoreline = () => ` ${s.team} ${lm.gf}–${lm.ga} ${them}.`;
+
   if (r < gUs) {
     const id = ourPlayer(s, lm, 'shoot')!;
-    const helper = ourPlayer(s, lm, 'pass');
     lm.gf++; lm.shots[0]++; lm.onTarget[0]++; lm.scorers.push(id);
-    say('us', 'goal', pick(lm, [
-      `GOAL! ${name(s, id)} smashes it in!`,
-      `GOAL! ${name(s, id)} slots it past the keeper!`,
-      `GOAL! ${helper && helper !== id ? `${name(s, helper)} sets up ${name(s, id)}` : name(s, id)} — and it’s in!`,
-      `GOAL! What a finish from ${name(s, id)}!`,
-    ]) + ` ${s.team} ${lm.gf}–${lm.ga} ${them}.`);
+    say('us', 'goal', fill(fresh(lm, GOAL_US), v(id)) + scoreline());
   } else if (r < gUs + gThem) {
     lm.ga++; lm.shots[1]++; lm.onTarget[1]++;
-    const keeper = name(s, lm.onPitch.gk);
-    say('them', 'goal', pick(lm, [
-      `Goal for ${them}. ${oppPlayer(lm, true)} finds the corner.`,
-      `${them} score. ${keeper} had no chance.`,
-      `Goal for ${them} — ${oppPlayer(lm)} gets in behind.`,
-    ]) + ` ${s.team} ${lm.gf}–${lm.ga} ${them}.`);
+    say('them', 'goal', fill(fresh(lm, GOAL_THEM), v()) + scoreline());
   } else if (r < gUs + gThem + gUs * SHOTS_PER_GOAL) {
     const id = ourPlayer(s, lm, 'shoot')!;
     lm.shots[0]++;
-    if (rand(lm) < 0.45) {
-      lm.onTarget[0]++;
-      say('us', 'save', pick(lm, [`${name(s, id)} shoots… saved!`, `${name(s, id)} forces a good save.`, `Great effort from ${name(s, id)}, but the keeper holds it.`]));
-    } else {
-      say('us', 'miss', pick(lm, [`${name(s, id)} shoots… just wide!`, `${name(s, id)} blazes it over.`, `${name(s, id)} hits the post!`]));
-    }
+    if (rand(lm) < 0.45) { lm.onTarget[0]++; say('us', 'save', fill(fresh(lm, SAVE_BY_THEM), v(id))); }
+    else say('us', 'miss', fill(fresh(lm, MISS_US), v(id)));
   } else if (r < gUs + gThem + (gUs + gThem) * SHOTS_PER_GOAL) {
     lm.shots[1]++;
-    const keeper = name(s, lm.onPitch.gk);
-    if (rand(lm) < 0.45) {
-      lm.onTarget[1]++;
-      say('them', 'save', pick(lm, [`${them} shoot — great save from ${keeper}!`, `${keeper} dives to stop ${oppPlayer(lm)}.`, `${keeper} gets down well to save.`]));
-    } else {
-      say('them', 'miss', pick(lm, [`${oppPlayer(lm, true)} shoots wide for ${them}.`, `${them} go close but it’s off target.`]));
-    }
+    if (rand(lm) < 0.45) { lm.onTarget[1]++; say('them', 'save', fill(fresh(lm, SAVE_BY_US), v())); }
+    else say('them', 'miss', fill(fresh(lm, MISS_THEM), v()));
   } else if ((lm.fun || 0) < 2 && rand(lm) < 0.03) {
     funnyMoment(s, lm, say);
-  } else if (rand(lm) < 0.35) {
-    if (ours) {
-      const a = ourPlayer(s, lm, 'pass');
-      say('us', 'play', pick(lm, [`${name(s, a)} keeps it moving.`, `Nice pass from ${name(s, a)}.`, `${name(s, a)} switches the play.`, `${s.team} building from the back.`]));
-    } else {
-      const t = ourPlayer(s, lm, 'tackle');
-      say('them', 'play', pick(lm, [`${them} on the ball.`, `Good tackle from ${name(s, t)}.`, `${name(s, t)} wins it back.`, `${them} pressing high.`]));
-    }
+  } else if (rand(lm) < 0.4) {
+    if (ours) say('us', 'play', fill(fresh(lm, PLAY_US), v()));
+    else say('them', 'play', fill(fresh(lm, PLAY_THEM), v(ourPlayer(s, lm, 'tackle'))));
   }
+
+  // the clock and the score, now and then
+  const diff = lm.gf - lm.ga;
+  if (m === 10 || m === 35) say('none', 'play', `${m === 10 ? 'Ten minutes gone' : 'Ten minutes into the second half'}:${scoreline()}`);
+  if (m === FULL - 5) {
+    say('none', 'play', diff < 0 ? `Five minutes left. ${s.team} need a goal!` : diff > 0 ? `Five minutes left. Can ${s.team} hold on?` : 'Five minutes left and it’s all square. Who wants it more?');
+  }
+  if (m === FULL - 1 && diff === 0 && rand(lm) < 0.5) say('none', 'play', 'Last minute! Everyone forward!');
 
   if (lm.coachAt && m === lm.coachAt) coachLosesIt(lm, them, say);
 
@@ -288,7 +302,7 @@ function finishWhistle(s: Save, lm: LiveMatch) {
   lm.events.push({ m: FULL, side: 'none', kind: 'whistle', text: `Full time: ${s.team} ${lm.gf}–${lm.ga} ${them}.` });
   if (lm.kind === 'cup' && lm.gf === lm.ga) {
     const keep = s.players[lm.onPitch.gk || '']?.s.keeping || 5;
-    const pUs = 0.68 + 0.006 * (strengths(s, lm).att - strengths(s, lm).them);
+    const pUs = 0.68 + 0.006 * (strengths(s, lm).att - strengths(s, lm).them) + 0.015 * Math.min(4, s.penPractice || 0);
     const pThem = 0.72 - 0.008 * (keep - 5);
     let a = 0;
     let b = 0;
@@ -380,6 +394,7 @@ export function completeLive(s: Save): MatchResult | null {
     recordCup(s, lm.w, res);
   }
   credit(s, res, lm.played);
+  afterResult(s, res);
   s.live = undefined;
   return res;
 }

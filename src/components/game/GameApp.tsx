@@ -10,10 +10,10 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/client';
 import { divisionFor, shortName } from '@/lib/game/ddsl';
 import {
-  STATS, SLOTS, PHASE_LABEL, PHASE_STATS, DRILLS_PER_SESSION,
-  newSave, syncSquad, runSession, weekState, currentWeek, nextWeek, dayOf, ourCupTie,
+  STATS, SLOTS, PHASE_LABEL, PHASE_STATS, DRILLS_PER_SESSION, SPECIALS,
+  newSave, syncSquad, runSession, runSpecial, getSpirit, spiritWord, weekState, currentWeek, nextWeek, dayOf, ourCupTie,
   table, seasonOver, autoLineup, cupRoundIn, summary,
-  type Save, type PlanDrill, type LibDrill, type MatchResult, type SessionResult, type Slot, type StatKey,
+  type Save, type PlanDrill, type LibDrill, type MatchResult, type SessionResult, type Slot, type StatKey, type SpecialId,
 } from '@/lib/game/engine';
 import {
   startLive, stepLive, subLive, setTactic, teamTalk, completeLive, rates, HALF, FULL, TACTICS, TALKS,
@@ -292,6 +292,9 @@ export default function GameApp({ token }: { token: string }) {
             onFinish={(drills) => {
               update((s) => { weekState(s, w)[session] = runSession(s, drills); });
             }}
+            onSpecial={(id) => {
+              update((s) => { weekState(s, w)[session] = runSpecial(s, id); });
+            }}
             onClose={() => setSession(null)}
           />
         ) : showMatch ? (
@@ -522,6 +525,7 @@ function Home({ save, w, library, news, manager, onTrain, onPlay, onShowMatch, o
       <Panel title={`This week · ${fmtDate(dayOf.tuesday(save, w), false)} – ${fmtDate(sunday, false)}`}>
         {sessionRow('tuesday')}
         {sessionRow('thursday')}
+        <SpiritLine save={save} />
       </Panel>
 
       {fx && (
@@ -594,12 +598,13 @@ function MiniTable({ save }: { save: Save }) {
 
 // ---------- training ----------
 
-function Training({ save, w, day, plan, library, onFinish, onClose }: {
+function Training({ save, w, day, plan, library, onFinish, onSpecial, onClose }: {
   save: Save; w: number; day: Day; plan: PlanDrill[]; library: LibDrill[];
-  onFinish: (drills: LibDrill[]) => void; onClose: () => void;
+  onFinish: (drills: LibDrill[]) => void; onSpecial: (id: SpecialId) => void; onClose: () => void;
 }) {
   const done = save.log[w]?.[day];
   const [picked, setPicked] = useState<string[]>([]);
+  const [mode, setMode] = useState<'drills' | 'special'>('drills');
   const inPlan = new Set(plan.filter((d) => d.day === day).map((d) => d.drill_id));
   const last = new Set(save.lastDrills || []);
 
@@ -607,7 +612,11 @@ function Training({ save, w, day, plan, library, onFinish, onClose }: {
     return (
       <Panel title={`${DAY_NAME[day]} training report`}>
         <div className="space-y-2 text-sm">
+          {done.special && <p className="text-sm font-bold text-amber-200">{SPECIALS.find((x) => x.id === done.special)?.label}</p>}
+          {done.event && <p className="text-xs bg-slate-800 border border-slate-600 p-2">{done.event}</p>}
+          {done.moment && <p className="text-xs bg-[#0f3a1e] border border-lime-700 p-2">⭐ <b>Breakthrough:</b> {done.moment}</p>}
           {done.mishap && <p className="text-xs bg-[#3a2a0b] border border-amber-700 p-2">😄 <b>Training news:</b> {done.mishap}</p>}
+          {!!done.spirit && <p className={`text-xs ${done.spirit > 0 ? 'text-lime-300' : 'text-red-300'}`}>Team spirit {done.spirit > 0 ? '+' : ''}{done.spirit} → {getSpirit(save)} ({spiritWord(getSpirit(save))})</p>}
           <ul className="space-y-1">
             {(done.drills || done.answers.map((a) => ({ drillId: a.drillId, title: a.title, phase: a.phase, repeat: false }))).map((d) => (
               <li key={d.drillId} className="text-xs border border-slate-600 p-1.5">
@@ -630,7 +639,30 @@ function Training({ save, w, day, plan, library, onFinish, onClose }: {
     setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : p.length < DRILLS_PER_SESSION ? [...p, id] : p));
 
   return (
-    <Panel title={`${DAY_NAME[day]} training · pick ${DRILLS_PER_SESSION} drills`} right={<span>{picked.length}/{DRILLS_PER_SESSION}</span>}>
+    <Panel title={`${DAY_NAME[day]} training`} right={mode === 'drills' ? <span>{picked.length}/{DRILLS_PER_SESSION}</span> : null}>
+      <div className="grid grid-cols-2 gap-px bg-slate-600 border border-slate-500 text-xs font-bold mb-2">
+        {(['drills', 'special'] as const).map((m) => (
+          <button key={m} onClick={() => setMode(m)} className={`py-1.5 ${mode === m ? 'bg-amber-300 text-slate-900' : 'bg-slate-800 text-slate-200'}`}>
+            {m === 'drills' ? `Pick ${DRILLS_PER_SESSION} drills` : 'Special session'}
+          </button>
+        ))}
+      </div>
+      {mode === 'special' ? (
+        <>
+          <div className="space-y-1">
+            {SPECIALS.map((sp) => (
+              <button key={sp.id} onClick={() => onSpecial(sp.id)} className="w-full text-left px-2 py-2 border bg-slate-800 border-slate-600">
+                <span className="text-sm font-bold">{sp.label}</span>
+                <span className="block text-[11px] text-slate-300">{sp.blurb}</span>
+              </button>
+            ))}
+          </div>
+          <div className="flex justify-between mt-2">
+            <Btn tone="plain" onClick={onClose}>Back</Btn>
+            <span className="text-[11px] text-slate-400 self-center">Team spirit: {getSpirit(save)} ({spiritWord(getSpirit(save))})</span>
+          </div>
+        </>
+      ) : (<>
       <p className="text-xs text-slate-300 mb-2">
         Each drill makes the whole squad better at what it trains. Players also work on their own focus (set it in Squad).
       </p>
@@ -668,6 +700,7 @@ function Training({ save, w, day, plan, library, onFinish, onClose }: {
           Run training
         </Btn>
       </div>
+      </>)}
     </Panel>
   );
 }
@@ -1285,5 +1318,24 @@ function EnergyBar({ e }: { e: number }) {
       <span className="flex-1 h-1.5 bg-slate-700"><span className={`block h-1.5 ${c}`} style={{ width: `${Math.round(e)}%` }} /></span>
       <span className="tabular-nums text-[10px] text-slate-400 w-6 text-right">{Math.round(e)}</span>
     </span>
+  );
+}
+
+function SpiritLine({ save }: { save: Save }) {
+  const v = getSpirit(save);
+  const c = v >= 60 ? 'bg-lime-400' : v >= 40 ? 'bg-amber-300' : 'bg-red-400';
+  return (
+    <div className="flex items-center gap-2 pt-1.5 text-xs">
+      <span className="text-slate-300 whitespace-nowrap">Team spirit</span>
+      <span className="flex-1 h-1.5 bg-slate-700"><span className={`block h-1.5 ${c}`} style={{ width: `${v}%` }} /></span>
+      <span className="font-bold whitespace-nowrap">{spiritWord(v)}</span>
+      {(save.form || []).length > 0 && (
+        <span className="flex gap-0.5">
+          {(save.form || []).map((r, i) => (
+            <span key={i} className={`w-4 text-center text-[10px] font-bold ${r === 'W' ? 'bg-lime-600' : r === 'L' ? 'bg-red-700' : 'bg-slate-600'}`}>{r}</span>
+          ))}
+        </span>
+      )}
+    </div>
   );
 }

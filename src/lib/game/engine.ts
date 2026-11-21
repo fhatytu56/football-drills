@@ -79,6 +79,16 @@ export interface GamePlayer {
 export interface SessionResult {
   status: 'done' | 'missed' | 'empty';
   drills?: { drillId: string; title: string; phase: string; repeat: boolean }[];
+  /** A bit of fun from training (no effect on stats). */
+  mishap?: string;
+  /** A special session instead of drills. */
+  special?: SpecialId;
+  /** Weather or something else that changed the session. */
+  event?: string;
+  /** A player's breakthrough (already counted in gains). */
+  moment?: string;
+  /** Change to team spirit from this session. */
+  spirit?: number;
   // older saves (quiz version)
   focus: string[];
   answers: { drillId: string; title: string; phase: string; correct: boolean; picked: string; right: string; prompt: string }[];
@@ -159,6 +169,22 @@ export interface Save {
   honours?: { season: number; pos: number; cup: boolean }[];
   /** Drills from the last session (running the same ones again in a row counts for less). */
   lastDrills?: string[];
+  /** How often each player has been in a joke, so it's spread evenly. */
+  jokes?: Record<string, number>;
+  /** Training sessions run, for picking the funny lines. */
+  sessions?: number;
+  /** The last few training jokes used, so they don't repeat. */
+  recentMishaps?: number[];
+  /** Team spirit 0–100 (60 if missing). Good spirit = a little better on Sunday. */
+  spirit?: number;
+  /** Last five results, newest last: 'W' | 'D' | 'L'. */
+  form?: string[];
+  /** Rested this week: legs tire more slowly in the next match. */
+  fresh?: boolean;
+  /** Penalty practice sessions this season (max 4 count). */
+  penPractice?: number;
+  /** How many breakthrough moments each player has had (spread evenly). */
+  moments?: Record<string, number>;
   /** Pre-match tactic. */
   tactic?: Tactic;
   /** A match being watched right now, so closing the app doesn't lose it. */
@@ -480,6 +506,7 @@ export function newSave(opts: { team: string; division: string; today: string; p
     cup: { rounds: [], out: false, won: false },
     oppBoost: opts.carry ? opts.carry.oppBoost + 2 : 0,
     cur: 0,
+    spirit: opts.carry ? opts.carry.spirit : undefined,
     honours: opts.carry
       ? [...(opts.carry.honours || []), { season: opts.carry.season, pos: table(opts.carry).findIndex((r) => r.team === opts.carry!.team) + 1, cup: opts.carry.cup.won }]
       : [],
@@ -544,25 +571,194 @@ function grow(p: GamePlayer, key: StatKey, g: number, gains: Record<string, Part
   if (got > 0) (gains[p.id] ||= {})[key] = ((gains[p.id] || {})[key] || 0) + got;
 }
 
-/** Run a session: the chosen drills train the whole squad; each player also works on their own focus. */
-export function runSession(s: Save, drills: LibDrill[]): SessionResult {
+export type SpecialId = 'fitness' | 'pens' | 'smallsided' | 'rest' | 'bonding';
+
+export const SPECIALS: { id: SpecialId; label: string; blurb: string }[] = [
+  { id: 'fitness', label: 'Fitness run', blurb: 'Laps, sprints, groans. Big boost to Fitness.' },
+  { id: 'pens', label: 'Penalty practice', blurb: 'Shooting and Keeping up a bit, and better in cup shoot-outs.' },
+  { id: 'smallsided', label: 'Small-sided match', blurb: 'A bit of everything, and the kids love it.' },
+  { id: 'rest', label: 'Rest day', blurb: 'No training. Fresher legs on Sunday, spirit up a bit.' },
+  { id: 'bonding', label: 'Team bonding', blurb: 'Pizza night, cinema or bowling. Team spirit way up.' },
+];
+
+export function getSpirit(s: Save) {
+  return typeof s.spirit === 'number' ? s.spirit : 60;
+}
+
+export function addSpirit(s: Save, d: number) {
+  s.spirit = Math.max(0, Math.min(100, Math.round(getSpirit(s) + d)));
+  return d;
+}
+
+/** 0 spirit = 5% worse on Sunday, 100 = 5% better. */
+export function spiritFactor(s: Save) {
+  return 0.95 + 0.1 * getSpirit(s) / 100;
+}
+
+export function spiritWord(v: number) {
+  return v >= 80 ? 'Buzzing' : v >= 60 ? 'Good' : v >= 40 ? 'OK' : v >= 20 ? 'Low' : 'Rock bottom';
+}
+
+const EVENTS: { text: string; mult: number; spirit: number; drop?: boolean }[] = [
+  { text: '🌧 Lashing rain. Everyone’s soaked and nobody can feel their toes.', mult: 0.8, spirit: -2 },
+  { text: '☀️ Gorgeous evening. Everyone’s flying.', mult: 1.1, spirit: 2 },
+  { text: '🧊 Pitch frozen solid. Moved to the little astro in the corner.', mult: 0.7, spirit: 0 },
+  { text: '💡 The floodlights go out halfway through! Session cut short.', mult: 1, spirit: 0, drop: true },
+  { text: '👨‍👩‍👦 The parents challenge the kids to a match at the end. Kids win 9–2. One dad pulls a hamstring.', mult: 1, spirit: 6 },
+  { text: '⭐ A League of Ireland player drops in to help out. Everyone’s on their best behaviour.', mult: 1.2, spirit: 4 },
+  { text: '💨 Gale-force wind. Every cross ends up on the next pitch.', mult: 0.9, spirit: 0 },
+];
+
+const BREAKTHROUGH: Record<StatKey, string[]> = {
+  passing: ['{n} plays a 30-yard pass right onto a teammate’s toe!', '{n} pulls off a no-look pass. Everyone stops to clap.', '{n} completes 20 passes in a row in the rondo!'],
+  dribbling: ['{n} finally nails the step-over!', '{n} dribbles through the whole cone course without touching one!', '{n} pulls off a Cruyff turn. The coach has to sit down.'],
+  shooting: ['{n} scores an absolute screamer in the end-of-session game!', '{n} hits the crossbar challenge three times in a row!', '{n} finally gets the hang of shooting with the laces!'],
+  tackling: ['{n} wins every 50-50 tonight!', '{n} times a slide tackle perfectly. Clean as a whistle.', '{n} wins the ball back five times in the small-sided game!'],
+  positioning: ['{n} is always in the right place tonight!', '{n} spots every run before it happens.', '{n} tells everyone where to stand. And they listen!'],
+  keeping: ['{n} goes in goal and saves three in a row!', '{n} tips a screamer over the bar in the shooting drill!', '{n} catches everything tonight. Hands like glue.'],
+  fitness: ['{n} wins the sprint race for the first time!', '{n} finishes the laps first and isn’t even out of breath.', '{n} does the bleep test and beats the coach.'],
+};
+
+/** Shared by drills and special sessions: weather/events, the work itself, individual focus, a breakthrough, the fun. */
+function session(s: Save, trains: StatKey[], work: (mult: number, dropLast: boolean) => void, special?: SpecialId): SessionResult {
   const gains: Record<string, Partial<Stats>> = {};
-  const last = new Set(s.lastDrills || []);
-  for (const d of drills.slice(0, DRILLS_PER_SESSION)) {
-    const mult = last.has(d.drill_id) ? REPEAT : 1;
-    for (const key of PHASE_STATS[d.game_phase] || ['fitness']) {
-      for (const p of Object.values(s.players)) grow(p, key, GAIN * mult, gains);
+  s.sessions = (s.sessions || 0) + 1;
+  const r = rng(hash(`${s.seed}:session:${s.sessions}`));
+  const resting = special === 'rest' || special === 'bonding';
+  let spirit = 0;
+  let event: string | undefined;
+  let mult = 1;
+  let dropLast = false;
+  if (!resting && r() < 0.35) {
+    const e = EVENTS[Math.floor(r() * EVENTS.length)];
+    event = e.text;
+    mult = e.mult;
+    dropLast = !!e.drop;
+    if (e.drop && special) mult = 0.7;
+    spirit += e.spirit;
+  }
+  work(mult, dropLast);
+  if (!resting) for (const p of Object.values(s.players)) if (p.focus) grow(p, p.focus, INDIVIDUAL * mult, gains);
+
+  let moment: string | undefined;
+  if (!resting && trains.length && r() < 0.25) {
+    const counts = (s.moments ||= {});
+    const ids = Object.keys(s.players);
+    const least = Math.min(...ids.map((id) => counts[id] || 0));
+    const pool = ids.filter((id) => (counts[id] || 0) === least);
+    const id = pool[Math.floor(r() * pool.length)];
+    counts[id] = (counts[id] || 0) + 1;
+    const p = s.players[id];
+    if (r() < 0.2 && p.positions[0] !== 'gk') {
+      moment = `${p.name} asks if they can play in goal on Sunday. Something to think about…`;
+      spirit += 1;
+    } else {
+      const key = p.focus && trains.includes(p.focus) ? p.focus : trains[Math.floor(r() * trains.length)];
+      const before = p.s[key];
+      p.s[key] = Math.min(MAX_STAT, before + 1);
+      const got = p.s[key] - before;
+      if (got > 0) (gains[id] ||= {})[key] = ((gains[id] || {})[key] || 0) + got;
+      const lines = BREAKTHROUGH[key];
+      moment = `${lines[Math.floor(r() * lines.length)].replace('{n}', p.name)} +1 ${STATS.find((x) => x.key === key)!.label}`;
     }
   }
-  for (const p of Object.values(s.players)) if (p.focus) grow(p, p.focus, INDIVIDUAL, gains);
-  s.lastDrills = drills.map((d) => d.drill_id);
-  return {
-    status: 'done',
-    focus: [],
-    answers: [],
-    drills: drills.map((d) => ({ drillId: d.drill_id, title: d.title, phase: d.game_phase, repeat: last.has(d.drill_id) })),
-    gains,
-  };
+  return { status: 'done', focus: [], answers: [], gains, event, moment, spirit, special, mishap: trainingMishap(s) };
+}
+
+/** Run a session: the chosen drills train the whole squad; each player also works on their own focus. */
+export function runSession(s: Save, drills: LibDrill[]): SessionResult {
+  const last = new Set(s.lastDrills || []);
+  const picked = drills.slice(0, DRILLS_PER_SESSION);
+  const trains = Array.from(new Set(picked.flatMap((d) => PHASE_STATS[d.game_phase] || ['fitness']))) as StatKey[];
+  const gains: Record<string, Partial<Stats>> = {};
+  const res = session(s, trains, (mult, dropLast) => {
+    const run = dropLast ? picked.slice(0, -1) : picked;
+    for (const d of run) {
+      const m = (last.has(d.drill_id) ? REPEAT : 1) * mult;
+      for (const key of PHASE_STATS[d.game_phase] || ['fitness']) {
+        for (const p of Object.values(s.players)) grow(p, key, GAIN * m, gains);
+      }
+    }
+  });
+  mergeGains(res.gains, gains);
+  s.lastDrills = picked.map((d) => d.drill_id);
+  addSpirit(s, res.spirit || 0);
+  res.drills = picked.map((d) => ({ drillId: d.drill_id, title: d.title, phase: d.game_phase, repeat: last.has(d.drill_id) }));
+  return res;
+}
+
+/** A special session instead of drills. */
+export function runSpecial(s: Save, id: SpecialId): SessionResult {
+  const trains: StatKey[] = id === 'fitness' ? ['fitness'] : id === 'pens' ? ['shooting', 'keeping'] : id === 'smallsided' ? ['passing', 'dribbling', 'shooting', 'tackling', 'positioning'] : [];
+  const gains: Record<string, Partial<Stats>> = {};
+  const res = session(s, trains, (mult) => {
+    const all = Object.values(s.players);
+    if (id === 'fitness') for (const p of all) grow(p, 'fitness', GAIN * 3 * mult, gains);
+    if (id === 'pens') for (const p of all) { grow(p, 'shooting', GAIN * 1.2 * mult, gains); grow(p, 'keeping', GAIN * 1.2 * mult, gains); }
+    if (id === 'smallsided') for (const p of all) for (const k of trains) grow(p, k, GAIN * 0.5 * mult, gains);
+  }, id);
+  mergeGains(res.gains, gains);
+  if (id === 'pens') s.penPractice = Math.min(4, (s.penPractice || 0) + 1);
+  if (id === 'smallsided') res.spirit = (res.spirit || 0) + 3;
+  if (id === 'rest') { s.fresh = true; res.spirit = (res.spirit || 0) + 4; }
+  if (id === 'bonding') {
+    const r = rng(hash(`${s.seed}:bonding:${s.sessions}`));
+    res.event = ['🍕 Pizza night! Someone puts pineapple on theirs. Huge debate.', '🎬 Cinema trip. Half the team falls asleep, the other half eats all the popcorn.', '🎳 Bowling! The coach comes last. Nobody will let him forget it.', '🍦 Ice cream trip to the seafront. A seagull steals a cone.'][Math.floor(r() * 4)];
+    res.spirit = (res.spirit || 0) + 12;
+  }
+  s.lastDrills = [];
+  addSpirit(s, res.spirit || 0);
+  return res;
+}
+
+function mergeGains(into: Record<string, Partial<Stats>>, from: Record<string, Partial<Stats>>) {
+  for (const [id, g] of Object.entries(from)) {
+    for (const [k, v] of Object.entries(g) as [StatKey, number][]) (into[id] ||= {})[k] = ((into[id] || {})[k] || 0) + v;
+  }
+}
+
+// ---------- A bit of fun ----------
+
+/** The player who's been in the fewest jokes so far (ties broken by `r`). Counts them in. */
+export function jokePlayer(s: Save, ids: string[], r: () => number): string | undefined {
+  if (!ids.length) return undefined;
+  const jokes = (s.jokes ||= {});
+  const least = Math.min(...ids.map((id) => jokes[id] || 0));
+  const pool = ids.filter((id) => (jokes[id] || 0) === least);
+  const id = pool[Math.floor(r() * pool.length)];
+  jokes[id] = (jokes[id] || 0) + 1;
+  return id;
+}
+
+const MISHAPS = [
+  '{n} was late: the car got stuck behind a tractor.',
+  '{n} missed the warm-up looking for the other boot.',
+  '{n} sneaked off during the water break to finish a bag of jellies behind the goal.',
+  '{n} turned up in school shoes. Again.',
+  '{n} spent the water break trying to do keepie-uppies with an orange.',
+  '{n} brought sweets for everyone. Morale is sky high.',
+  '{n} arrived ten minutes late holding a 99 with a flake.',
+  '{n} forgot shin guards and used two copybooks instead.',
+  '{n} asked if training could be cancelled because of “a bit of wind”.',
+  '{n} did the whole warm-up with a jersey on backwards.',
+  '{n} was late because the dog ate a football sock.',
+  '{n} told everyone a cousin plays for Liverpool. Nobody believes it.',
+  '{n} tried to take a penalty with a crisp packet still in hand.',
+  '{n} got the cones out, then sat on one.',
+];
+
+/** About one session in three has something funny happen. Just for laughs. */
+function trainingMishap(s: Save): string | undefined {
+  const r = rng(hash(`${s.seed}:mishap:${s.sessions || 0}`));
+  if (r() > 0.36) return undefined;
+  const id = jokePlayer(s, Object.keys(s.players), r);
+  if (!id) return undefined;
+  // don't repeat any of the last few lines
+  const recent = (s.recentMishaps ||= []);
+  const fresh = MISHAPS.map((_, i) => i).filter((i) => !recent.includes(i));
+  const i = fresh[Math.floor(r() * fresh.length)];
+  s.recentMishaps = [...recent, i].slice(-6);
+  return MISHAPS[i].replace('{n}', s.players[id].name);
 }
 
 // ---------- The week ----------
@@ -624,7 +820,19 @@ export function credit(s: Save, m: MatchResult, played?: string[]) {
 /** Missed training is marked when Sunday's match starts. */
 export function closeTraining(s: Save, w: number) {
   const ws = weekState(s, w);
-  for (const day of ['tuesday', 'thursday'] as const) if (!ws[day]) ws[day] = { status: 'missed', focus: [], answers: [], gains: {} };
+  for (const day of ['tuesday', 'thursday'] as const) {
+    if (!ws[day]) { ws[day] = { status: 'missed', focus: [], answers: [], gains: {} }; addSpirit(s, -3); }
+  }
+}
+
+/** After a match: spirit goes up with wins, down with defeats (more on a losing run). */
+export function afterResult(s: Save, m: MatchResult) {
+  const won = m.gf > m.ga || (!!m.pens && m.pens[0] > m.pens[1]);
+  const lost = m.gf < m.ga || (!!m.pens && m.pens[0] < m.pens[1]);
+  const r = won ? 'W' : lost ? 'L' : 'D';
+  const prev = (s.form || []).slice(-1)[0];
+  addSpirit(s, r === 'W' ? 6 : r === 'D' ? 1 : prev === 'L' ? -8 : -5);
+  s.form = [...(s.form || []), r].slice(-5);
 }
 
 /** Sunday without watching (used by the balance checks): league game and cup tie, instantly. */
@@ -638,6 +846,7 @@ export function playWeek(s: Save, w: number, auto: boolean) {
     const m = playMatch(s, fx.opp, fx.home, w, s.seed + w * 53 + 1, auto);
     ws.match = m;
     credit(s, m);
+    afterResult(s, m);
     recordLeagueWeek(s, w, m);
   }
   const tie = ourCupTie(s, w);
@@ -645,6 +854,7 @@ export function playWeek(s: Save, w: number, auto: boolean) {
     const m = playMatch(s, tie.a === s.team ? tie.b : tie.a, tie.a === s.team, w, s.seed + w * 71 + 3, auto, true);
     ws.cup = m;
     credit(s, m);
+    afterResult(s, m);
     recordCup(s, w, m);
   } else recordCup(s, w, null);
   return ws;
